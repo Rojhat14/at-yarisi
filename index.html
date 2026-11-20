@@ -220,9 +220,12 @@ const SILKS = [
 ];
 const COATS = ['#8b4a2b', '#a0522d', '#3a2a24', '#9a948c', '#d4a85a', '#6e3b22', '#c9c4bd'];
 const LANES = 5;
-const TRACK_TOP = 570, LANE_H = 176, TRACK_BOTTOM = TRACK_TOP + LANES * LANE_H;
-const START_X = 215, FINISH_X = 1000, HORSE_S = 0.92, NOSE = 108;
-const laneGround = i => TRACK_TOP + i * LANE_H + 160;
+// TikTok uygulamasında üst ~215 px (profil, Katıl, sıralama) ve sol alt (yorumlar) kapanır;
+// önemli her şey 220–1300 arasında tutulur.
+const TRACK_TOP = 560, LANE_H = 148, TRACK_BOTTOM = TRACK_TOP + LANES * LANE_H;
+const START_X = 200, FINISH_X = 1000, HORSE_S = 0.8, NOSE = 108;
+const laneGround = i => TRACK_TOP + i * LANE_H + 134;
+const SAFE_TOP = 222;
 const noseX = h => START_X + clamp(h.pos / G.U, 0, 1.08) * (FINISH_X - START_X);
 
 /* =====================================================================
@@ -424,7 +427,7 @@ const G = {
   users: new Map(), lastChat: new Map(), likeBuckets: new Map(),
   notifs: [], notifQueue: [], notifTimer: 0, particles: [], floaters: [],
   leader: -1, lastLeaderSay: -99, milestones: new Set(), lastStatus: 0, lastInvite: -99, lastContrib: 0,
-  joinBuf: [], joinFlushAt: 0, excitement: 0, hoofAcc: 0, gateOpen: 0, flash: 0
+  joinBuf: [], joinFlushAt: 0, joinToasts: [], joinToast: null, excitement: 0, hoofAcc: 0, gateOpen: 0, flash: 0
 };
 try { G.raceNo = parseInt(localStorage.getItem('atYarisi.koşu') || '0', 10) || 0; } catch (e) { /* depolama yok */ }
 const queue = [];
@@ -470,7 +473,9 @@ function joinHorse(e, idx, silent, auto) {
   if (lateJoin) G.U = Math.min(CONFIG.race.maxUnits, G.U + CONFIG.race.lateJoinUnits);
   if (!h.supporters.has(e.key)) h.supporters.set(e.key, { name: e.name, raw: e.raw, pts: 0 });
   if (!silent) {
-    notify(e.name + ' → ' + h.num + ' ' + h.name, SILKS[idx].silk, '🏇');
+    G.joinToasts.push({ name: e.name, idx });
+    if (G.joinToasts.length > 30) G.joinToasts.shift();
+    h.joinName = e.name; h.joinAt = G.t;
     G.joinBuf.push({ raw: e.raw, idx });
     if (!G.joinFlushAt) G.joinFlushAt = G.t + 3;
     SFX.join();
@@ -757,7 +762,7 @@ function update(dt) {
         }
       }
       if (h.floatAcc >= 1 && G.t - h.floatAt > 0.5) {
-        floater(noseX(h) - 60, laneGround(h.lane) - 150, '+' + Math.round(h.floatAcc), SILKS[h.lane].silk, 26);
+        floater(noseX(h) - 60, laneGround(h.lane) - 128, '+' + Math.round(h.floatAcc), SILKS[h.lane].silk, 26);
         h.floatAcc = 0; h.floatAt = G.t;
       }
     }
@@ -807,6 +812,14 @@ function update(dt) {
   }
   for (let i = G.notifs.length - 1; i >= 0; i--) if (G.t - G.notifs[i].born > CONFIG.notify.durationSeconds) G.notifs.splice(i, 1);
   G.flash = Math.max(0, G.flash - dt * 1.2);
+  // katılım duyurusu: tek tek gösterilir; birikirse toplu gösterilir
+  if (G.joinToast && G.t - G.joinToast.born > G.joinToast.dur) G.joinToast = null;
+  if (!G.joinToast && G.joinToasts.length) {
+    if (G.joinToasts.length >= 3) {
+      const all = G.joinToasts.splice(0);
+      G.joinToast = { group: all, born: G.t, dur: 2.8 };
+    } else G.joinToast = { ...G.joinToasts.shift(), born: G.t, dur: 2.2 };
+  }
 }
 function ranking() { return G.horses.slice().sort((a, b) => b.pos - a.pos); }
 function raceCommentary() {
@@ -1011,8 +1024,9 @@ function drawGate() {
 }
 function drawLaneTags() {
   for (const h of G.horses) {
-    const y = TRACK_TOP + h.lane * LANE_H + 8, s = SILKS[h.lane];
+    const y = TRACK_TOP + h.lane * LANE_H + 6, s = SILKS[h.lane];
     ctx.fillStyle = 'rgba(10,20,8,0.72)'; rrPath(ctx, 8, y - 2, 400, 38, 19); ctx.fill();
+    if (h.joinAt && G.t - h.joinAt < 1.6) { ctx.strokeStyle = s.silk; ctx.lineWidth = 4 + 3 * Math.sin(G.t * 14); ctx.stroke(); }
     ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(28, y + 17, 15, 0, TAU); ctx.fill();
     txt(String(h.num), 28, y + 18, 20, s.num, 'center', { stroke: false });
     setFont(24);
@@ -1025,7 +1039,16 @@ function drawHorses() {
   for (const h of G.horses) {
     const x = noseX(h) - NOSE * HORSE_S, y = laneGround(h.lane);
     drawHorse(h, x, y, HORSE_S);
-    if (G.leader === h.lane && (G.phase === 'race' || G.phase === 'photo')) txt('👑', x + 30, y - 150, 26, '#fff', 'center', { stroke: false });
+    if (G.leader === h.lane && (G.phase === 'race' || G.phase === 'photo')) txt('👑', x + 30, y - 128, 26, '#fff', 'center', { stroke: false });
+    if (h.joinName && G.t - h.joinAt < 2.6) {
+      const a = clamp((2.6 - (G.t - h.joinAt)) / 0.5, 0, 1), rise = (G.t - h.joinAt) * 10;
+      ctx.globalAlpha = a; setFont(26);
+      const label = '+ ' + fitText(h.joinName, 260), tw = ctx.measureText(label).width;
+      const bx = clamp(x + 20, tw / 2 + 12, W - tw / 2 - 12);
+      ctx.fillStyle = SILKS[h.lane].silk; rrPath(ctx, bx - tw / 2 - 12, y - 118 - rise, tw + 24, 38, 19); ctx.fill();
+      txt(label, bx, y - 99 - rise, 26, SILKS[h.lane].num, 'center', { stroke: false });
+      ctx.globalAlpha = 1;
+    }
   }
 }
 function drawParticles() {
@@ -1039,10 +1062,8 @@ function drawParticles() {
   ctx.globalAlpha = 1;
 }
 function drawTop() {
-  const gr = ctx.createLinearGradient(0, 0, 0, 200);
-  gr.addColorStop(0, 'rgba(10,18,8,0.85)'); gr.addColorStop(1, 'rgba(10,18,8,0)');
-  ctx.fillStyle = gr; ctx.fillRect(0, 0, W, 200);
-  txt('🏇 AT YARIŞI', 540, 64, 74, '#ffd56b', 'center', { font: TFONT, lw: 10 });
+  ctx.fillStyle = 'rgba(10,18,8,0.55)'; rrPath(ctx, 60, SAFE_TOP, 960, 118, 28); ctx.fill();
+  txt('🏇 AT YARIŞI', 540, SAFE_TOP + 38, 58, '#ffd56b', 'center', { font: TFONT, lw: 9 });
   let sub = 'Koşu #' + G.raceNo + ' · ';
   if (G.phase === 'lobby') sub += 'Atını seç: yorumlara 1-5 yaz!';
   else if (G.phase === 'race' || G.phase === 'photo') {
@@ -1050,28 +1071,52 @@ function drawTop() {
     sub += 'Lider: ' + lead.num + ' ' + lead.name + ' · ' + Math.min(CONFIG.race.meters, Math.round(lead.pos / G.U * CONFIG.race.meters)) + ' / ' + CONFIG.race.meters + ' m';
     if (Math.floor(G.t / 6) % 3 === 2) sub = 'Koşu #' + G.raceNo + ' · Sen de katıl: yorumlara 1-5 yaz!';
   } else sub += 'Koşu tamamlandı!';
-  setFont(32); txt(fitText(sub, 1000), 540, 128, 32, '#f3f8ef', 'center', { lw: 6 });
+  setFont(30); txt(fitText(sub, 920), 540, SAFE_TOP + 92, 30, '#f3f8ef', 'center', { lw: 6 });
 }
 function drawNotifs() {
   if (G.phase === 'results') return;
-  let y = 170;
-  for (const n of G.notifs) {
+  let y = 438;
+  for (const n of G.notifs.slice(0, 2)) {
     const age = G.t - n.born, dur = CONFIG.notify.durationSeconds;
     const a = age < 0.2 ? age / 0.2 : age > dur - 0.4 ? (dur - age) / 0.4 : 1;
     ctx.globalAlpha = clamp(a, 0, 1);
-    ctx.fillStyle = 'rgba(10,18,8,0.85)'; rrPath(ctx, 20, y, 640, 50, 14); ctx.fill();
+    ctx.fillStyle = 'rgba(10,18,8,0.88)'; rrPath(ctx, 300, y, 760, 50, 14); ctx.fill();
     ctx.strokeStyle = n.color; ctx.lineWidth = 3; ctx.stroke();
-    txt(n.icon, 48, y + 26, 24, '#fff', 'center', { stroke: false });
-    setFont(22);
-    if (!n.fit) n.fit = fitText(n.text, 580);
-    txt(n.fit, 72, y + 26, 22, '#f8fbf5', 'left', { lw: 4 });
-    y += 58;
+    txt(n.icon, 330, y + 26, 24, '#fff', 'center', { stroke: false });
+    setFont(24);
+    if (!n.fit) n.fit = fitText(n.text, 680);
+    txt(n.fit, 356, y + 26, 24, '#f8fbf5', 'left', { lw: 4 });
+    y += 56;
   }
   ctx.globalAlpha = 1;
 }
+function drawJoinToast() {
+  const t = G.joinToast;
+  if (!t) return;
+  const age = G.t - t.born, a = age < 0.2 ? age / 0.2 : age > t.dur - 0.35 ? (t.dur - age) / 0.35 : 1;
+  const sc = age < 0.25 ? 0.85 + 0.15 * easeOut(age / 0.25) : 1;
+  const x = 80, y = TRACK_TOP + 80, w = 920, h = 124;
+  ctx.save(); ctx.globalAlpha = clamp(a, 0, 1);
+  ctx.translate(540, y + h / 2); ctx.scale(sc, sc); ctx.translate(-540, -(y + h / 2));
+  ctx.fillStyle = 'rgba(10,18,8,0.92)'; rrPath(ctx, x, y, w, h, 30); ctx.fill();
+  if (t.group) {
+    ctx.strokeStyle = '#ffd56b'; ctx.lineWidth = 5; ctx.stroke();
+    txt('🏇 +' + t.group.length + ' YENİ OYUNCU!', 540, y + 42, 42, '#ffd56b', 'center', { lw: 6 });
+    setFont(26);
+    txt(fitText(t.group.map(j => j.name + ' (' + (j.idx + 1) + ')').join(', '), w - 60), 540, y + 92, 26, '#ffffff', 'center', { lw: 4 });
+  } else {
+    const hh = G.horses[t.idx], s = SILKS[t.idx];
+    ctx.strokeStyle = s.silk === '#f4f4f0' ? '#ffffff' : s.silk; ctx.lineWidth = 6; ctx.stroke();
+    ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(x + 66, y + h / 2, 42, 0, TAU); ctx.fill();
+    txt(String(t.idx + 1), x + 66, y + h / 2 + 2, 46, s.num, 'center', { stroke: false });
+    setFont(44); txt(fitText(t.name, w - 170), x + 128, y + 44, 44, '#ffffff', 'left', { lw: 6 });
+    setFont(29); txt(fitText((hh ? hh.name : '') + ' takımına katıldı! 🏇', w - 170), x + 128, y + 92, 29, '#ffe9a8', 'left', { lw: 4 });
+  }
+  ctx.restore();
+}
 function drawLobbyBanner() {
   if (G.phase !== 'lobby') return;
-  const x = 300, y = TRACK_TOP + 300, w = 740, h = 250;
+  const x = 300, y = TRACK_TOP + 330, w = 740, h = 250;
   ctx.fillStyle = 'rgba(10,18,8,0.78)'; rrPath(ctx, x, y, w, h, 26); ctx.fill();
   ctx.strokeStyle = '#ffd56b'; ctx.lineWidth = 4; ctx.stroke();
   txt('ATINI SEÇ!', x + w / 2, y + 60, 62, '#ffd56b', 'center', { font: TFONT, lw: 8 });
@@ -1085,7 +1130,7 @@ function drawLobbyBanner() {
   } else txt('Geri sayım için en az ' + CONFIG.race.minHorses + ' farklı at: ' + chosenHorses() + '/' + CONFIG.race.minHorses, x + w / 2, y + 196, 32, '#cfe0c8', 'center', { lw: 5, weight: 'italic bold' });
 }
 function drawCaption() {
-  const x = 20, y = TRACK_BOTTOM + 40, w = 1040, h = 96;
+  const x = 20, y = SAFE_TOP + 126, w = 1040, h = 84;
   const age = SPEECH.captionAge, show = SPEECH.speaking || age < 6;
   ctx.fillStyle = 'rgba(10,18,8,0.88)'; rrPath(ctx, x, y, w, h, 18); ctx.fill();
   ctx.strokeStyle = SPEECH.speaking ? '#ffd56b' : 'rgba(217,177,74,0.5)'; ctx.lineWidth = 3; ctx.stroke();
@@ -1094,10 +1139,10 @@ function drawCaption() {
   if (!show || !SPEECH.caption) { txt('Spiker yarışı izliyor…', x + 86, y + h / 2, 26, '#9fb59a', 'left', { stroke: false, weight: 'italic' }); return; }
   setFont(29);
   const lines = wrapText(SPEECH.caption, w - 110, 2);
-  lines.forEach((l, i) => txt(l, x + 86, y + h / 2 + (i - (lines.length - 1) / 2) * 36, 29, '#ffffff', 'left', { stroke: false }));
+  lines.forEach((l, i) => txt(l, x + 86, y + h / 2 + (i - (lines.length - 1) / 2) * 34, 29, '#ffffff', 'left', { stroke: false }));
 }
 function drawTable() {
-  const x = 20, y = TRACK_BOTTOM + 146, w = 660, h = H - y - 14;
+  const x = 20, y = TRACK_BOTTOM + 30, w = 660, h = 300;
   ctx.fillStyle = 'rgba(10,18,8,0.8)'; rrPath(ctx, x, y, w, h, 18); ctx.fill();
   ctx.strokeStyle = '#d9b14a'; ctx.lineWidth = 3; ctx.stroke();
   txt('📋 TARAFTAR TABLOSU', x + w / 2, y + 30, 25, '#ffd56b', 'center', { lw: 4 });
@@ -1118,7 +1163,7 @@ function drawTable() {
   });
 }
 function drawHowTo() {
-  const x = 695, y = TRACK_BOTTOM + 146, w = 365, h = H - y - 14;
+  const x = 695, y = TRACK_BOTTOM + 30, w = 365, h = 300;
   ctx.fillStyle = 'rgba(10,18,8,0.84)'; rrPath(ctx, x, y, w, h, 18); ctx.fill();
   ctx.strokeStyle = '#d9b14a'; ctx.lineWidth = 2; ctx.stroke();
   txt('❓ NASIL OYNANIR', x + w / 2, y + 30, 23, '#ffd56b', 'center', { lw: 4 });
@@ -1133,29 +1178,29 @@ function drawResults() {
   if (G.phase !== 'results' || !G.winner) return;
   const a = easeOut(clamp(G.phaseTime / 0.6, 0, 1)), w = G.winner, s = SILKS[w.lane];
   ctx.save(); ctx.globalAlpha = a;
-  const x = 50, y = 190, pw = 980, ph = TRACK_BOTTOM - 210;
+  const x = 50, y = SAFE_TOP + 216, pw = 980, ph = TRACK_BOTTOM + 10 - (SAFE_TOP + 216);
   ctx.fillStyle = 'rgba(10,18,8,0.86)'; rrPath(ctx, x, y, pw, ph, 30); ctx.fill();
   ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = 5; ctx.stroke();
-  txt('🏆 KAZANAN 🏆', 540, y + 70, 56, '#ffd34d', 'center', { font: TFONT, lw: 8 });
-  ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(540, y + 160, 46, 0, TAU); ctx.fill();
-  txt(String(w.num), 540, y + 162, 52, s.num, 'center', { stroke: false });
-  txt(w.name, 540, y + 240, 64, '#ffffff', 'center', { font: TFONT, lw: 8 });
+  txt('🏆 KAZANAN 🏆', 540, y + 55, 50, '#ffd34d', 'center', { font: TFONT, lw: 8 });
+  ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(540, y + 130, 40, 0, TAU); ctx.fill();
+  txt(String(w.num), 540, y + 132, 46, s.num, 'center', { stroke: false });
+  txt(w.name, 540, y + 205, 56, '#ffffff', 'center', { font: TFONT, lw: 8 });
   const show = { ...w, speedVis: 0.9, boost: 0 };
-  drawHorse(show, 480, y + 490, 1.3);
-  txt('EN ÇOK DESTEKLEYENLER', 540, y + 550, 32, '#ffd56b', 'center', { lw: 5 });
-  if (!G.winnerTop.length) txt(hasBot(w) ? '🤖 Bu koşuyu ahır botu kazandı! Sıradakinde yen!' : 'Bu koşuda destek gelmedi', 540, y + 610, 28, '#cfe0c8', 'center', { lw: 4 });
+  drawHorse(show, 485, y + 410, 1.05);
+  txt('EN ÇOK DESTEKLEYENLER', 540, y + 458, 30, '#ffd56b', 'center', { lw: 5 });
+  if (!G.winnerTop.length) txt(hasBot(w) ? '🤖 Bu koşuyu ahır botu kazandı! Sıradakinde yen!' : 'Bu koşuda destek gelmedi', 540, y + 512, 28, '#cfe0c8', 'center', { lw: 4 });
   const medals = ['#ffd34d', '#d7dde3', '#d59a5a'];
   G.winnerTop.forEach((sp, i) => {
-    const ry = y + 610 + i * 58;
+    const ry = y + 512 + i * 54;
     ctx.fillStyle = medals[i]; ctx.beginPath(); ctx.arc(250, ry, 20, 0, TAU); ctx.fill();
     txt(String(i + 1), 250, ry + 1, 22, '#1a1f14', 'center', { stroke: false });
     setFont(32); txt(fitText(sp.name, 420), 290, ry, 32, '#ffffff', 'left', { lw: 5 });
     txt(fmt(sp.pts) + ' puan', 830, ry, 28, '#ffd56b', 'right', { lw: 4 });
   });
   const order = G.finishOrder.map(h => h.place + '. ' + h.name).join('   ');
-  setFont(24); txt(fitText(order, 900), 540, y + ph - 90, 24, '#cfe0c8', 'center', { lw: 4 });
+  setFont(24); txt(fitText(order, 900), 540, y + ph - 78, 24, '#cfe0c8', 'center', { lw: 4 });
   const left = Math.max(0, Math.ceil(CONFIG.race.resultsSeconds - G.phaseTime));
-  txt('Yeni koşu ' + left + ' sn sonra · Şimdiden 1-5 yazıp atını seç!', 540, y + ph - 44, 27, '#f3f8ef', 'center', { lw: 5 });
+  txt('Yeni koşu ' + left + ' sn sonra · Şimdiden 1-5 yazıp atını seç!', 540, y + ph - 38, 27, '#f3f8ef', 'center', { lw: 5 });
   ctx.restore();
 }
 function render() {
@@ -1170,10 +1215,11 @@ function render() {
   drawParticles();
   drawFloaters();
   drawTop();
-  drawNotifs();
   drawLobbyBanner();
   drawResults();
   drawCaption();
+  drawNotifs();
+  if (G.phase !== 'results') drawJoinToast();
   drawTable();
   drawHowTo();
   if (G.flash > 0) { ctx.fillStyle = 'rgba(255,250,225,' + G.flash + ')'; ctx.fillRect(0, 0, W, H); }
