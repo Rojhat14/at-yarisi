@@ -274,6 +274,12 @@ const SFX = (function () {
 let wsSock = null, wsStatus = 'bağlı değil';
 const wsOpen = () => !!wsSock && wsSock.readyState === 1;
 function wsSend(o) { if (wsOpen()) { try { wsSock.send(JSON.stringify(o)); } catch (e) { /* sessiz */ } } }
+function screenInfo() {
+  let gl = '';
+  try { if (typeof renderer !== 'undefined' && renderer) { const c = renderer.getContext(); gl = c.drawingBufferWidth + 'x' + c.drawingBufferHeight; } } catch (e) { /* yok */ }
+  return { type: 'ekran', w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio || 1, gl, ua: navigator.userAgent.slice(0, 160) };
+}
+window.addEventListener('resize', () => wsSend(screenInfo()));
 function wsUrl() {
   const u = CONFIG.websocket.url;
   if (u && u !== 'auto') return u;
@@ -1075,7 +1081,7 @@ requestAnimationFrame(frame);
     let ws;
     try { ws = new WebSocket(wsUrl()); } catch (e) { setTimeout(connect, CONFIG.websocket.reconnectMs); return; }
     wsSock = ws;
-    ws.onopen = () => { wsStatus = 'bağlı'; };
+    ws.onopen = () => { wsStatus = 'bağlı'; wsSend(screenInfo()); };
     ws.onmessage = m => {
       try {
         const d = JSON.parse(m.data);
