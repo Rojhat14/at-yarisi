@@ -41,7 +41,7 @@ const CONFIG = {
   race: {
     lobbySeconds: 25,            // en az minHorses farklı at seçildikten sonra koşunun başlamasına kalan süre
     minHorses: 2,                // geri sayım için en az kaç farklı atın taraftarı olmalı
-    baseUnits: 1200,             // bitiş çizgisi için gereken en az birim
+    baseUnits: 360,              // bitiş çizgisi için gereken en az birim (tek kişide ~1-1,5 dk)
     unitsPerParticipant: 120,    // koşu başında at seçmiş her kişi için eklenen birim
     lateJoinUnits: 40,           // koşu sırasında katılan her kişi için mesafeye eklenen birim
     maxUnits: 15000,
@@ -67,6 +67,15 @@ const CONFIG = {
     likeFullPerWindow: 40,       // bu pencerede tam sayılan beğeni
     likeOverflowFactor: 0.3,     // fazlası bu oranla sayılır
     autoAssign: true             // numara yazmadan beğeni/hediye gönderen, en az taraftarlı ata atanır
+  },
+  bots: {                       // açıkça etiketli "ev sahibi" rakipler: az kişiyle de yarış olsun
+    enabled: true,
+    maxBots: 2,
+    onlyBelowPlayers: 8,         // bu kadar ve daha fazla gerçek oyuncu varken bot katılmaz, varsa güç vermez
+    lobbyDelaySeconds: 6,        // tek at seçildikten bu kadar sn sonra bot başka bir at seçer
+    secondBotBelowPlayers: 3,    // koşu başlarken gerçek oyuncu bundan azsa ikinci bot da katılır
+    unitsPerSecond: 4,           // botun itme gücü ≈ saniyede 4 beğeni yapan bir izleyici; gerçek oyuncu arttıkça azalır
+    names: ['🤖 Ahır Botu', '🤖 Seyis Botu']
   },
   speech: {
     enabled: true,
@@ -431,7 +440,7 @@ function newRace() {
   }));
   G.phase = 'lobby'; G.phaseTime = 0; G.lobbyEnd = 0; G.photoEnd = 0; G.finishOrder = []; G.winner = null; G.winnerTop = [];
   G.U = CONFIG.race.baseUnits; G.leader = -1; G.milestones.clear(); G.likeBuckets.clear(); G.particles.length = 0; G.floaters.length = 0;
-  G.gateOpen = 0; G.lastInvite = G.t; G.lastContrib = G.t;
+  G.gateOpen = 0; G.lastInvite = G.t; G.lastContrib = G.t; G.firstJoinAt = 0;
   // sonuç ekranında seçim yapanlar yeni koşuda o atla başlar
   for (const [k, u] of G.users) {
     const nh = u.nextHorse; u.horse = null; u.nextHorse = null;
@@ -456,6 +465,7 @@ function joinHorse(e, idx, silent, auto) {
     if (old && (G.phase === 'lobby' || old.pts <= 0)) G.horses[u.horse].supporters.delete(e.key);
   }
   const lateJoin = G.phase === 'race' && u.horse == null;
+  if (G.phase === 'lobby' && !G.firstJoinAt) G.firstJoinAt = G.t;
   u.horse = idx; u.auto = !!auto;
   if (lateJoin) G.U = Math.min(CONFIG.race.maxUnits, G.U + CONFIG.race.lateJoinUnits);
   if (!h.supporters.has(e.key)) h.supporters.set(e.key, { name: e.name, raw: e.raw, pts: 0 });
@@ -616,11 +626,53 @@ function particle(p) { if (G.particles.length < CONFIG.spam.maxParticles) { p.ma
 /* =====================================================================
    Akış: lobi → koşu → fotofiniş → sonuç
    ===================================================================== */
+function realCount(h) { let n = 0; for (const sp of h.supporters.values()) if (!sp.bot) n++; return n; }
+function hasBot(h) { for (const sp of h.supporters.values()) if (sp.bot) return true; return false; }
+function realPlayers() { let n = 0; for (const h of G.horses) n += realCount(h); return n; }
+function botCount() { let n = 0; for (const h of G.horses) for (const sp of h.supporters.values()) if (sp.bot) n++; return n; }
+function addBot() {
+  const B = CONFIG.bots, k = botCount();
+  if (!B.enabled || k >= B.maxBots) return false;
+  let pool = G.horses.filter(h => h.supporters.size === 0);
+  if (!pool.length) pool = G.horses.filter(h => !hasBot(h));
+  if (!pool.length) return false;
+  const h = pick(pool), name = B.names[k % B.names.length];
+  h.supporters.set('bot:' + k, { name, raw: name, pts: 0, bot: true, acc: 0 });
+  notify(name + ' → ' + h.num + ' ' + h.name, SILKS[h.lane].silk, '🤖');
+  SPEECH.say((k ? 'Seyis botu ' : 'Ahır botu ') + h.num + ' numara ' + h.name + ' ile yarışa giriyor! Onu geçebilecek misin?', 1, 'bot', 5);
+  return true;
+}
+function botPower() {
+  const B = CONFIG.bots;
+  return clamp(1 - realPlayers() / B.onlyBelowPlayers, 0, 1);
+}
+function updateBots(dt) {
+  const pw = botPower();
+  if (pw <= 0) return;
+  const rate = CONFIG.bots.unitsPerSecond * pw;
+  const lead = leaderPos();
+  for (const h of G.horses) {
+    if (h.place != null || h.finishT != null) continue;
+    for (const sp of h.supporters.values()) {
+      if (!sp.bot) continue;
+      sp.acc += dt;
+      if (sp.acc < 0.5) continue;
+      sp.acc = 0;
+      let amt = rate * 0.5 * rand(0.4, 1.6);
+      // bot öne çok açılırsa yavaşlar (yenilebilir kalsın)
+      const second = Math.max(0, ...G.horses.filter(o => o !== h).map(o => o.pos));
+      if (h.pos >= lead && (h.pos - second) / G.U > 0.06) amt *= 0.25;
+      h.pending += amt * catchup(h);
+      sp.pts += amt;
+    }
+  }
+}
 function chosenHorses() { let n = 0; for (const h of G.horses) if (h.supporters.size > 0) n++; return n; }
 function participants() { let n = 0; for (const h of G.horses) n += h.supporters.size; return n; }
 function startRace() {
   const R = CONFIG.race;
-  G.U = Math.round(clamp(R.baseUnits + R.unitsPerParticipant * participants(), R.baseUnits, R.maxUnits));
+  if (CONFIG.bots.enabled && realPlayers() > 0 && realPlayers() < CONFIG.bots.secondBotBelowPlayers) while (botCount() < CONFIG.bots.maxBots && addBot());
+  G.U = Math.round(clamp(R.baseUnits + R.unitsPerParticipant * realPlayers(), R.baseUnits, R.maxUnits));
   G.phase = 'race'; G.phaseTime = 0; G.gateOpen = 0.001; G.lastContrib = G.t; G.lastStatus = G.t;
   SFX.bell();
   SFX.cheer(0.5);
@@ -639,7 +691,7 @@ function finishRace() {
   G.finishOrder = order;
   const w = order[0];
   G.winner = w;
-  G.winnerTop = Array.from(w.supporters.values()).filter(s => s.pts > 0).sort((a, b) => b.pts - a.pts).slice(0, 3);
+  G.winnerTop = Array.from(w.supporters.values()).filter(s => s.pts > 0 && !s.bot).sort((a, b) => b.pts - a.pts).slice(0, 3);
   SFX.fanfare();
   SFX.cheer(1);
   G.flash = 0.5;
@@ -648,6 +700,7 @@ function finishRace() {
   let line = 'Ve kazanan, ' + w.num + ' numara, ' + w.name + '! ';
   if (names.length === 1) line += 'En çok destekleyen ' + names[0] + '. Tebrikler!';
   else if (names.length > 1) line += 'En çok destekleyenler: ' + names.slice(0, -1).join(', ') + ' ve ' + names[names.length - 1] + '. Tebrikler!';
+  else if (hasBot(w)) line += 'Bu koşuyu ahır botu kazandı! Bir sonraki koşuda onu yenebilir misin?';
   else line += 'Tebrikler!';
   SPEECH.clear();
   SPEECH.say(line, 3);
@@ -672,8 +725,10 @@ function update(dt) {
     else if (b.length > 1) SPEECH.say(speakName(b[0].raw) + ' ve ' + (b.length - 1) + ' kişi daha atını seçti!', 1, 'join', 4);
   }
   if (P === 'lobby') {
+    const B = CONFIG.bots;
+    if (B.enabled && G.firstJoinAt && chosenHorses() < R.minHorses && realPlayers() > 0 && realPlayers() < B.onlyBelowPlayers && G.t - G.firstJoinAt > B.lobbyDelaySeconds) addBot();
     const enough = chosenHorses() >= R.minHorses;
-    if (enough && !G.lobbyEnd) { G.lobbyEnd = G.t + R.lobbySeconds; SPEECH.say('İki at seçildi, geri sayım başladı! ' + R.lobbySeconds + ' saniye sonra kapılar açılıyor!', 2); }
+    if (enough && !G.lobbyEnd) { G.lobbyEnd = G.t + R.lobbySeconds; SPEECH.say('Geri sayım başladı! ' + R.lobbySeconds + ' saniye sonra kapılar açılıyor!', 2); }
     if (!enough && G.lobbyEnd) { G.lobbyEnd = 0; G.milestones.delete('l10'); G.milestones.delete('l3'); }
     if (!G.lobbyEnd) {
       if (G.t - G.lastInvite > CONFIG.speech.inviteEverySeconds) { G.lastInvite = G.t; SPEECH.say('Atını seçmek için yorumlara bir ile beş arası bir numara yaz! En az iki farklı at seçilince geri sayım başlar.', 1); }
@@ -706,7 +761,7 @@ function update(dt) {
         h.floatAcc = 0; h.floatAt = G.t;
       }
     }
-    if (P === 'race') raceCommentary();
+    if (P === 'race') { updateBots(dt); raceCommentary(); }
     if (G.phase === 'photo' && G.t >= G.photoEnd) finishRace();
   } else if (P === 'results') {
     if (G.phaseTime >= R.resultsSeconds) newRace();
@@ -962,7 +1017,7 @@ function drawLaneTags() {
     txt(String(h.num), 28, y + 18, 20, s.num, 'center', { stroke: false });
     setFont(24);
     txt(fitText(h.name, 225), 52, y + 18, 24, '#ffffff', 'left', { lw: 4 });
-    txt('👥 ' + h.supporters.size, 398, y + 18, 23, '#ffe9a8', 'right', { lw: 4 });
+    txt((hasBot(h) ? '🤖 ' : '') + '👥 ' + realCount(h), 398, y + 18, 23, '#ffe9a8', 'right', { lw: 4 });
     if (h.place != null && G.phase === 'results') txt(h.place + '.', 418, y + 18, 26, '#ffd34d', 'left', { lw: 4 });
   }
 }
@@ -1052,9 +1107,9 @@ function drawTable() {
     ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(x + 34, ry, 17, 0, TAU); ctx.fill();
     txt(String(hh.num), x + 34, ry + 1, 19, s.num, 'center', { stroke: false });
     setFont(26); txt(fitText(hh.name, 200), x + 62, ry, 26, '#f3f8ef', 'left', { lw: 4 });
-    txt('👥 ' + hh.supporters.size, x + 285, ry, 24, '#ffe9a8', 'left', { lw: 4 });
+    txt('👥 ' + realCount(hh) + (hasBot(hh) ? ' 🤖' : ''), x + 285, ry, 24, '#ffe9a8', 'left', { lw: 4 });
     let top = null;
-    for (const sp of hh.supporters.values()) if (sp.pts > 0 && (!top || sp.pts > top.pts)) top = sp;
+    for (const sp of hh.supporters.values()) if (!sp.bot && sp.pts > 0 && (!top || sp.pts > top.pts)) top = sp;
     setFont(21);
     txt(top ? '⭐ ' + fitText(top.name, 140) : '', x + 375, ry, 21, '#cfe0c8', 'left', { lw: 3 });
     const p = clamp(hh.pos / G.U, 0, 1);
@@ -1088,7 +1143,7 @@ function drawResults() {
   const show = { ...w, speedVis: 0.9, boost: 0 };
   drawHorse(show, 480, y + 490, 1.3);
   txt('EN ÇOK DESTEKLEYENLER', 540, y + 550, 32, '#ffd56b', 'center', { lw: 5 });
-  if (!G.winnerTop.length) txt('Bu koşuda destek gelmedi', 540, y + 610, 28, '#cfe0c8', 'center', { lw: 4 });
+  if (!G.winnerTop.length) txt(hasBot(w) ? '🤖 Bu koşuyu ahır botu kazandı! Sıradakinde yen!' : 'Bu koşuda destek gelmedi', 540, y + 610, 28, '#cfe0c8', 'center', { lw: 4 });
   const medals = ['#ffd34d', '#d7dde3', '#d59a5a'];
   G.winnerTop.forEach((sp, i) => {
     const ry = y + 610 + i * 58;
@@ -1210,6 +1265,7 @@ if (new URLSearchParams(location.search).get('test') === '1' || location.hash ==
       'FPS: ' + fps + '   Aşama: ' + G.phase + '\n' +
       'Kuyruk: ' + queue.length + '   Katılımcı: ' + participants() + '\n' +
       'Bitiş birimi: ' + G.U + '   En az süre: ' + CONFIG.race.minRaceSeconds + ' sn\n' +
+      'Bot: ' + botCount() + ' (' + (CONFIG.bots.unitsPerSecond * botPower()).toFixed(1) + ' birim/sn)   Gerçek oyuncu: ' + realPlayers() + '\n' +
       'Seçilen at: ' + chosenHorses() + '   Koşu süresi: ' + (G.phase === 'race' ? Math.round(G.phaseTime) + ' sn' : '-') + '\n' +
       'WebSocket: ' + wsStatus + '   Ses: ' + SFX.state + '\n' +
       'Spiker: ' + (SPEECH.speaking ? 'konuşuyor' : 'sessiz') + '\n' +
