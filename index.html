@@ -39,11 +39,13 @@ const CONFIG = {
     reconnectMs: 5000
   },
   race: {
-    lobbySeconds: 25,            // ilk kişi at seçtikten sonra koşunun başlamasına kalan süre
-    baseUnits: 400,              // bitiş çizgisi için gereken en az birim
-    unitsPerParticipant: 45,     // koşu başında at seçmiş her kişi için eklenen birim
-    maxUnits: 4000,
-    maxSpeedFraction: 0.07,      // bir at saniyede en fazla pistin bu oranı kadar koşar (koşu en az ~14 sn)
+    lobbySeconds: 25,            // en az minHorses farklı at seçildikten sonra koşunun başlamasına kalan süre
+    minHorses: 2,                // geri sayım için en az kaç farklı atın taraftarı olmalı
+    baseUnits: 1200,             // bitiş çizgisi için gereken en az birim
+    unitsPerParticipant: 120,    // koşu başında at seçmiş her kişi için eklenen birim
+    lateJoinUnits: 40,           // koşu sırasında katılan her kişi için mesafeye eklenen birim
+    maxUnits: 15000,
+    minRaceSeconds: 45,          // koşu en az bu kadar sürer (atların en yüksek hızı buna göre)
     releaseRate: 2.2,            // biriken gücün harcanma hızı (yumuşak hareket)
     photoSeconds: 3,             // ilk at bitişe vardıktan sonra fotofiniş süresi
     resultsSeconds: 20,          // sonuç ekranı süresi, sonra yeni koşu
@@ -74,7 +76,8 @@ const CONFIG = {
     readNames: true,             // kullanıcı adlarını sesli oku (uygunsuz kelime filtresi açık)
     maxQueue: 3,
     statusEverySeconds: 14,
-    inviteEverySeconds: 30
+    inviteEverySeconds: 30,
+    greetEverySeconds: 25        // yayına giren izleyiciyi karşılama aralığı
   },
   render: {
     hiDpi: true,                 // ekran 1080×1920'den büyükse daha yüksek çözünürlükte (keskin) çiz
@@ -439,18 +442,22 @@ function newRace() {
 }
 function getUser(e) {
   let u = G.users.get(e.key);
-  if (!u) { u = { name: e.name, raw: e.raw, horse: null, nextHorse: null }; G.users.set(e.key, u); }
+  if (!u) { u = { name: e.name, raw: e.raw, horse: null, nextHorse: null, auto: false }; G.users.set(e.key, u); }
   u.name = e.name; u.raw = e.raw;
   return u;
 }
-function joinHorse(e, idx, silent) {
+function joinHorse(e, idx, silent, auto) {
   const u = getUser(e), h = G.horses[idx];
-  if (!h || u.horse === idx) return false;
+  if (!h || u.horse === idx) { if (u.horse === idx && !auto) u.auto = false; return false; }
   if (u.horse != null) {
-    if (G.phase !== 'lobby') return false;            // koşu başladıktan sonra at değiştirilemez
-    G.horses[u.horse].supporters.delete(e.key);
+    // koşu başladıktan sonra at değiştirilemez; otomatik atananlar bir kez kendi atını seçebilir
+    if (G.phase !== 'lobby' && !u.auto) return false;
+    const old = G.horses[u.horse].supporters.get(e.key);
+    if (old && (G.phase === 'lobby' || old.pts <= 0)) G.horses[u.horse].supporters.delete(e.key);
   }
-  u.horse = idx;
+  const lateJoin = G.phase === 'race' && u.horse == null;
+  u.horse = idx; u.auto = !!auto;
+  if (lateJoin) G.U = Math.min(CONFIG.race.maxUnits, G.U + CONFIG.race.lateJoinUnits);
   if (!h.supporters.has(e.key)) h.supporters.set(e.key, { name: e.name, raw: e.raw, pts: 0 });
   if (!silent) {
     notify(e.name + ' → ' + h.num + ' ' + h.name, SILKS[idx].silk, '🏇');
@@ -458,7 +465,6 @@ function joinHorse(e, idx, silent) {
     if (!G.joinFlushAt) G.joinFlushAt = G.t + 3;
     SFX.join();
   }
-  if (G.phase === 'lobby' && !G.lobbyEnd) G.lobbyEnd = G.t + CONFIG.race.lobbySeconds;
   return true;
 }
 function teamOf(e) {
@@ -473,7 +479,7 @@ function teamOf(e) {
   }
   if (!opts.length) return null;
   const idx = pick(opts);
-  joinHorse(e, idx, false);
+  joinHorse(e, idx, false, true);
   return idx;
 }
 function leaderPos() { let m = 0; for (const h of G.horses) m = Math.max(m, h.pos + h.pending * 0); return m; }
@@ -506,7 +512,7 @@ window.handleEvent = function (ev) { try { enqueue(ev); } catch (e) { /* sessiz 
 function enqueue(ev) {
   if (!ev || typeof ev !== 'object') return;
   const type = String(ev.type || '').toLowerCase();
-  if (!['chat', 'like', 'gift', 'follow', 'share'].includes(type)) return;
+  if (!['chat', 'like', 'gift', 'follow', 'share', 'member'].includes(type)) return;
   const key = String(ev.user || ev.nickname || 'anonim').slice(0, 80);
   const raw = String(ev.nickname || ev.user || 'Anonim');
   const e = {
@@ -576,6 +582,15 @@ function processEvent(e) {
       }
       break;
     }
+    case 'member': {
+      const u = getUser(e);
+      if (u.horse == null && (P === 'lobby' || P === 'race') && G.t - (G.lastGreet || -99) > CONFIG.speech.greetEverySeconds) {
+        G.lastGreet = G.t;
+        notify(e.name + ' yayına katıldı! 1-5 yaz, atını seç', '#bfe6ff', '👋');
+        SPEECH.say('Hoş geldin ' + speakName(e.raw) + '! Bir ile beş arası numara yaz, atını seç!', 1, 'greet', CONFIG.speech.greetEverySeconds);
+      }
+      break;
+    }
     case 'follow': {
       const h = contribute(e, Pt.follow, 'follow');
       notify(e.name + ' takip etti!' + (h ? ' +' + h.name : ''), '#9be39b', '➕');
@@ -601,6 +616,7 @@ function particle(p) { if (G.particles.length < CONFIG.spam.maxParticles) { p.ma
 /* =====================================================================
    Akış: lobi → koşu → fotofiniş → sonuç
    ===================================================================== */
+function chosenHorses() { let n = 0; for (const h of G.horses) if (h.supporters.size > 0) n++; return n; }
 function participants() { let n = 0; for (const h of G.horses) n += h.supporters.size; return n; }
 function startRace() {
   const R = CONFIG.race;
@@ -656,8 +672,11 @@ function update(dt) {
     else if (b.length > 1) SPEECH.say(speakName(b[0].raw) + ' ve ' + (b.length - 1) + ' kişi daha atını seçti!', 1, 'join', 4);
   }
   if (P === 'lobby') {
+    const enough = chosenHorses() >= R.minHorses;
+    if (enough && !G.lobbyEnd) { G.lobbyEnd = G.t + R.lobbySeconds; SPEECH.say('İki at seçildi, geri sayım başladı! ' + R.lobbySeconds + ' saniye sonra kapılar açılıyor!', 2); }
+    if (!enough && G.lobbyEnd) { G.lobbyEnd = 0; G.milestones.delete('l10'); G.milestones.delete('l3'); }
     if (!G.lobbyEnd) {
-      if (G.t - G.lastInvite > CONFIG.speech.inviteEverySeconds) { G.lastInvite = G.t; SPEECH.say('Atını seçmek için yorumlara bir ile beş arası bir numara yaz! İlk seçimle geri sayım başlar.', 1); }
+      if (G.t - G.lastInvite > CONFIG.speech.inviteEverySeconds) { G.lastInvite = G.t; SPEECH.say('Atını seçmek için yorumlara bir ile beş arası bir numara yaz! En az iki farklı at seçilince geri sayım başlar.', 1); }
     } else {
       const left = G.lobbyEnd - G.t;
       if (left <= 10 && !G.milestones.has('l10')) { G.milestones.add('l10'); SPEECH.say('On saniye kaldı! Atını seçmeyen kalmasın!', 2); }
@@ -665,7 +684,7 @@ function update(dt) {
       if (left <= 0) { G.milestones.clear(); startRace(); }
     }
   } else if (P === 'race' || P === 'photo') {
-    const maxRate = G.U * R.maxSpeedFraction;
+    const maxRate = G.U / R.minRaceSeconds;
     for (const h of G.horses) {
       let mv = 0;
       if (h.pending > 0 && h.place == null) {
@@ -974,6 +993,7 @@ function drawTop() {
   else if (G.phase === 'race' || G.phase === 'photo') {
     const lead = ranking()[0];
     sub += 'Lider: ' + lead.num + ' ' + lead.name + ' · ' + Math.min(CONFIG.race.meters, Math.round(lead.pos / G.U * CONFIG.race.meters)) + ' / ' + CONFIG.race.meters + ' m';
+    if (Math.floor(G.t / 6) % 3 === 2) sub = 'Koşu #' + G.raceNo + ' · Sen de katıl: yorumlara 1-5 yaz!';
   } else sub += 'Koşu tamamlandı!';
   setFont(32); txt(fitText(sub, 1000), 540, 128, 32, '#f3f8ef', 'center', { lw: 6 });
 }
@@ -1007,7 +1027,7 @@ function drawLobbyBanner() {
     ctx.save(); ctx.translate(x + w / 2, y + 196); ctx.scale(pulse, pulse);
     txt('Koşu ' + left + ' sn sonra başlıyor', 0, 0, 38, left <= 5 ? '#ff8a6a' : '#bfffb0', 'center', { lw: 6 });
     ctx.restore();
-  } else txt('İlk seçimle geri sayım başlar…', x + w / 2, y + 196, 32, '#cfe0c8', 'center', { lw: 5, weight: 'italic bold' });
+  } else txt('Geri sayım için en az ' + CONFIG.race.minHorses + ' farklı at: ' + chosenHorses() + '/' + CONFIG.race.minHorses, x + w / 2, y + 196, 32, '#cfe0c8', 'center', { lw: 5, weight: 'italic bold' });
 }
 function drawCaption() {
   const x = 20, y = TRACK_BOTTOM + 40, w = 1040, h = 96;
@@ -1177,6 +1197,7 @@ if (new URLSearchParams(location.search).get('test') === '1' || location.hash ==
       for (let i = 0; i < 30; i++) setTimeout(() => { const p = newPerson(); send({ type: 'chat', user: p.user, nickname: p.nickname, text: String(1 + (i % 5)) }); }, i * 60);
       let k = 0; const iv = setInterval(() => { if (++k > 120) { clearInterval(iv); return; } const p = anyPerson(); send({ type: 'like', user: p.user, nickname: p.nickname, count: 5 + ((Math.random() * 10) | 0) }); if (k % 25 === 0) gift(pick([1, 5, 30]), 'Gül'); }, 120);
     }, 'wide'],
+    ['👋 Yayına giriş', () => { const p = newPerson(); send({ type: 'member', user: p.user, nickname: p.nickname }); }],
     ['▶️ Koşuyu başlat', () => { if (G.phase === 'lobby') startRace(); }],
     ['🔊 Ses aç/kapat', () => SFX.toggle()],
     ['🎙️ Spiker testi', () => SPEECH.say('Merhaba! Ben yarışın spikeriyim. Ses düzgün geliyor mu?', 3)],
@@ -1188,7 +1209,8 @@ if (new URLSearchParams(location.search).get('test') === '1' || location.hash ==
     stats.textContent =
       'FPS: ' + fps + '   Aşama: ' + G.phase + '\n' +
       'Kuyruk: ' + queue.length + '   Katılımcı: ' + participants() + '\n' +
-      'Bitiş birimi: ' + G.U + '   Parçacık: ' + G.particles.length + '\n' +
+      'Bitiş birimi: ' + G.U + '   En az süre: ' + CONFIG.race.minRaceSeconds + ' sn\n' +
+      'Seçilen at: ' + chosenHorses() + '   Koşu süresi: ' + (G.phase === 'race' ? Math.round(G.phaseTime) + ' sn' : '-') + '\n' +
       'WebSocket: ' + wsStatus + '   Ses: ' + SFX.state + '\n' +
       'Spiker: ' + (SPEECH.speaking ? 'konuşuyor' : 'sessiz') + '\n' +
       G.horses.map(h => h.num + ': ' + Math.round(h.pos) + ' (+' + Math.round(h.pending) + ') ×' + catchup(h).toFixed(2)).join('\n');
