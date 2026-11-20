@@ -85,7 +85,8 @@ const CONFIG = {
   audio: {
     enabled: true,
     volume: 0.5,
-    crowd: 0.22                  // tribün uğultusu seviyesi
+    crowd: 0,                    // sürekli tribün uğultusu (0 = kapalı; yayında hışırtı gibi duyulabilir)
+    cheers: 0.5                  // heyecanlı anlarda kısa tezahürat dalgası seviyesi (0 = kapalı)
   },
   spam: {
     chatCooldownMs: 3000,
@@ -243,7 +244,7 @@ const SFX = (function () {
   ['pointerdown', 'keydown', 'touchstart'].forEach(ev => window.addEventListener(ev, unlock, { passive: true }));
   init();
   setInterval(() => { if (ac && ac.state === 'suspended') ac.resume().catch(() => {}); }, 1000);
-  function ok() { if (muted || !ac || ac.state !== 'running') return false; startCrowd(); return true; }
+  function ok() { if (muted || !ac || ac.state !== 'running') return false; if (A.crowd > 0) startCrowd(); return true; }
   function env(g, t0, a, dur, peak) { g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(peak, t0 + a); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur); }
   function noise(t0, dur, f0, f1, peak, type, q) {
     const s = ac.createBufferSource(); s.buffer = noiseBuf;
@@ -262,7 +263,20 @@ const SFX = (function () {
     unlock,
     get state() { return !ac ? 'yok' : muted ? 'kapalı' : ac.state === 'running' ? 'açık' : 'tıklayın'; },
     toggle() { muted = !muted; if (crowdGain) crowdGain.gain.value = 0; return muted; },
-    crowd(level, duck) { if (!ok() || !crowdGain) return; crowdGain.gain.setTargetAtTime(A.crowd * level * (duck ? 0.45 : 1), ac.currentTime, 0.4); },
+    crowd(level, duck) { if (A.crowd <= 0 || !ok() || !crowdGain) return; crowdGain.gain.setTargetAtTime(A.crowd * level * (duck ? 0.45 : 1), ac.currentTime, 0.4); },
+    // kısa tezahürat: yumuşak açılıp kapanan, alçak frekanslı kalabalık sesi (sürekli hışırtı yok)
+    cheer(strength) {
+      if (!A.cheers || !ok()) return;
+      const t = ac.currentTime, dur = 1.2 + strength * 2, peak = A.cheers * (0.35 + strength * 0.65);
+      const s = ac.createBufferSource(); s.buffer = noiseBuf;
+      const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1100; lp.Q.value = 0.5;
+      const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 180;
+      const g = ac.createGain();
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(peak, t + 0.35);
+      g.gain.setValueAtTime(peak, t + dur * 0.45); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      s.connect(lp); lp.connect(hp); hp.connect(g); g.connect(master);
+      s.start(t, Math.random() * 2); s.stop(t + dur + 0.1);
+    },
     hoof(v) { if (!ok()) return; const t = ac.currentTime; noise(t, 0.09, 420, 120, 0.25 * v, 'lowpass', 1); tone(t, 0.06, 95, 60, 0.18 * v); },
     bell() {
       if (!ok()) return; const t = ac.currentTime;
@@ -555,6 +569,7 @@ function processEvent(e) {
         h.boost = Math.max(h.boost, clamp(units / G.U * 25, 1.2, 6));
         notify(e.name + ' ' + label + (e.count > 1 ? ' ×' + e.count : '') + ' → ' + h.name + ' sprint!', '#ffd56b', '🎁');
         SFX.gift(big);
+        if (big) SFX.cheer(0.6);
         const who = speakName(e.raw);
         if (big) SPEECH.say(who + ' hediye gönderdi! ' + h.num + ' numara ' + h.name + ' sprint atıyor!', 2);
         else SPEECH.say(who + ' hediye gönderdi, ' + h.name + ' hızlanıyor!', 1, 'gift', 7);
@@ -592,6 +607,7 @@ function startRace() {
   G.U = Math.round(clamp(R.baseUnits + R.unitsPerParticipant * participants(), R.baseUnits, R.maxUnits));
   G.phase = 'race'; G.phaseTime = 0; G.gateOpen = 0.001; G.lastContrib = G.t; G.lastStatus = G.t;
   SFX.bell();
+  SFX.cheer(0.5);
   SPEECH.clear();
   SPEECH.say('Kapılar açıldı, koşu başladı! Beğeni gönder, atını koştur!', 3);
 }
@@ -609,6 +625,7 @@ function finishRace() {
   G.winner = w;
   G.winnerTop = Array.from(w.supporters.values()).filter(s => s.pts > 0).sort((a, b) => b.pts - a.pts).slice(0, 3);
   SFX.fanfare();
+  SFX.cheer(1);
   G.flash = 0.5;
   for (let i = 0; i < 160; i++) particle({ x: rand(0, W), y: rand(-200, 0), vx: rand(-40, 40), vy: rand(120, 300), g: 60, life: rand(3, 5), size: rand(6, 12), color: pick(['#ffd34d', '#ff5a5a', '#5ab0ff', '#7ee07e', '#ffffff', '#ff9ad5']), confetti: true, rot: rand(0, TAU), vr: rand(-6, 6) });
   const names = G.winnerTop.map(s => speakName(s.raw));
@@ -724,7 +741,7 @@ function raceCommentary() {
   if (lp > 0.03 && lead.lane !== G.leader) {
     const first = G.leader < 0;
     G.leader = lead.lane;
-    if (G.t - G.lastLeaderSay > 5 || first) { G.lastLeaderSay = G.t; SPEECH.say(lead.num + ' numara ' + lead.name + (first ? ' iyi başladı, önde!' : ' öne geçti!'), 2); }
+    if (G.t - G.lastLeaderSay > 5 || first) { G.lastLeaderSay = G.t; SFX.cheer(0.35); SPEECH.say(lead.num + ' numara ' + lead.name + (first ? ' iyi başladı, önde!' : ' öne geçti!'), 2); }
   }
   if (lp >= 0.5 && !G.milestones.has('half')) { G.milestones.add('half'); SPEECH.say('Koşunun yarısı geride kaldı! Önde ' + lead.name + ', arkasında ' + second.name + '!', 2); }
   if (lp >= 0.8 && !G.milestones.has('final')) { G.milestones.add('final'); SPEECH.say('Son düzlüğe girdiler! Şimdi beğeni zamanı!', 2); }
