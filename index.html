@@ -447,8 +447,11 @@ function newRace() {
   // sonuç ekranında seçim yapanlar yeni koşuda o atla başlar
   for (const [k, u] of G.users) {
     const nh = u.nextHorse; u.horse = null; u.nextHorse = null;
-    if (nh != null) joinHorse({ key: k, name: u.name, raw: u.raw }, nh, true);
+    if (nh === -1) G.joinLater = (G.joinLater || []).concat([{ key: k, name: u.name, raw: u.raw }]);
+    else if (nh != null) joinHorse({ key: k, name: u.name, raw: u.raw }, nh, true);
   }
+  for (const j of G.joinLater || []) teamOf(j);
+  G.joinLater = [];
   const names2 = G.horses.map(h => h.num + ' ' + h.name).join(', ');
   SPEECH.say('Koşu ' + G.raceNo + ' için atlar piste çıkıyor! ' + names2 + '. Atını seçmek için yorumlara bir ile beş arası bir numara yaz!', 3);
 }
@@ -550,16 +553,52 @@ function enqueue(ev) {
   }
   queue.push(e);
 }
+/* Yorumdan at seçimi: numara (1-5), at adı ya da "katıl" */
+const TR_MAP = { 'ç': 'c', 'ğ': 'g', 'ı': 'i', 'i̇': 'i', 'ö': 'o', 'ş': 's', 'ü': 'u', 'â': 'a', 'î': 'i', 'û': 'u' };
+function norm(t) {
+  return String(t || '').toLocaleLowerCase('tr').replace(/[çğıöşüâîû]/g, c => TR_MAP[c] || c)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+const JOIN_WORDS = ['katil', 'katiliyorum', 'katildim', 'katilmak', 'katilayim', 'join', 'varim', 'bendevarim', 'oyna', 'oynayalim'];
+function horseFromText(text) {
+  const t = ' ' + norm(text) + ' ', tokens = t.trim().split(' ');
+  // 1) tam at adı
+  const full = G.horses.filter(h => t.includes(' ' + norm(h.name) + ' '));
+  if (full.length === 1) return full[0].lane;
+  // 2) at adının ayırt edici bir kelimesi (en az 4 harf, başka atta geçmeyen)
+  const hits = new Set();
+  for (const h of G.horses) {
+    for (const w of norm(h.name).split(' ')) {
+      if (w.length < 4) continue;
+      if (G.horses.some(o => o !== h && norm(o.name).split(' ').some(x => x.length >= 4 && (x.startsWith(w.slice(0, 4)) || w.startsWith(x.slice(0, 4)))))) continue;
+      if (tokens.some(k => k.length >= 4 && (k === w || w.startsWith(k) || k.startsWith(w)))) hits.add(h.lane);
+    }
+  }
+  return hits.size === 1 ? [...hits][0] : -1;
+}
+function wantsJoin(text) {
+  const n = norm(text), compact = n.replace(/ /g, '');
+  return n.split(' ').some(k => JOIN_WORDS.includes(k)) || compact.includes('bendevarim') || compact.includes('bendekatil');
+}
 function processEvent(e) {
   const P = G.phase, Pt = CONFIG.points;
   switch (e.type) {
     case 'chat': {
       const m = e.text.match(/(?:^|[^0-9])([1-5])(?![0-9])/);
-      if (m) {
-        const idx = parseInt(m[1], 10) - 1;
+      const byName = m ? -1 : horseFromText(e.text);
+      if (m || byName >= 0) {
+        const idx = m ? parseInt(m[1], 10) - 1 : byName;
         if (P === 'results' || P === 'photo') { getUser(e).nextHorse = idx; break; }
         joinHorse(e, idx, false);
         break;
+      }
+      if (wantsJoin(e.text)) {
+        const u = getUser(e);
+        if (u.horse == null) {
+          if (P === 'results' || P === 'photo') u.nextHorse = -1;
+          else teamOf(e);
+          break;
+        }
       }
       const t = performance.now(), last = G.lastChat.get(e.key);
       if (last !== undefined && t - last < CONFIG.spam.chatCooldownMs) break;
@@ -736,7 +775,7 @@ function update(dt) {
     if (enough && !G.lobbyEnd) { G.lobbyEnd = G.t + R.lobbySeconds; SPEECH.say('Geri sayım başladı! ' + R.lobbySeconds + ' saniye sonra kapılar açılıyor!', 2); }
     if (!enough && G.lobbyEnd) { G.lobbyEnd = 0; G.milestones.delete('l10'); G.milestones.delete('l3'); }
     if (!G.lobbyEnd) {
-      if (G.t - G.lastInvite > CONFIG.speech.inviteEverySeconds) { G.lastInvite = G.t; SPEECH.say('Atını seçmek için yorumlara bir ile beş arası bir numara yaz! En az iki farklı at seçilince geri sayım başlar.', 1); }
+      if (G.t - G.lastInvite > CONFIG.speech.inviteEverySeconds) { G.lastInvite = G.t; SPEECH.say('Atını seçmek için yorumlara bir ile beş arası numara ya da atın adını yaz. Sadece katıl yazarsan seni bir ata ben yerleştiririm!', 1); }
     } else {
       const left = G.lobbyEnd - G.t;
       if (left <= 10 && !G.milestones.has('l10')) { G.milestones.add('l10'); SPEECH.say('On saniye kaldı! Atını seçmeyen kalmasın!', 2); }
@@ -1065,11 +1104,11 @@ function drawTop() {
   ctx.fillStyle = 'rgba(10,18,8,0.55)'; rrPath(ctx, 60, SAFE_TOP, 960, 118, 28); ctx.fill();
   txt('🏇 AT YARIŞI', 540, SAFE_TOP + 38, 58, '#ffd56b', 'center', { font: TFONT, lw: 9 });
   let sub = 'Koşu #' + G.raceNo + ' · ';
-  if (G.phase === 'lobby') sub += 'Atını seç: yorumlara 1-5 yaz!';
+  if (G.phase === 'lobby') sub += 'Atını seç: 1-5, at adı ya da "katıl" yaz!';
   else if (G.phase === 'race' || G.phase === 'photo') {
     const lead = ranking()[0];
     sub += 'Lider: ' + lead.num + ' ' + lead.name + ' · ' + Math.min(CONFIG.race.meters, Math.round(lead.pos / G.U * CONFIG.race.meters)) + ' / ' + CONFIG.race.meters + ' m';
-    if (Math.floor(G.t / 6) % 3 === 2) sub = 'Koşu #' + G.raceNo + ' · Sen de katıl: yorumlara 1-5 yaz!';
+    if (Math.floor(G.t / 6) % 3 === 2) sub = 'Koşu #' + G.raceNo + ' · Sen de katıl: 1-5, at adı ya da "katıl" yaz!';
   } else sub += 'Koşu tamamlandı!';
   setFont(30); txt(fitText(sub, 920), 540, SAFE_TOP + 92, 30, '#f3f8ef', 'center', { lw: 6 });
 }
@@ -1120,7 +1159,7 @@ function drawLobbyBanner() {
   ctx.fillStyle = 'rgba(10,18,8,0.78)'; rrPath(ctx, x, y, w, h, 26); ctx.fill();
   ctx.strokeStyle = '#ffd56b'; ctx.lineWidth = 4; ctx.stroke();
   txt('ATINI SEÇ!', x + w / 2, y + 60, 62, '#ffd56b', 'center', { font: TFONT, lw: 8 });
-  txt('Yorumlara 1, 2, 3, 4 veya 5 yaz', x + w / 2, y + 126, 34, '#ffffff', 'center', { lw: 6 });
+  txt('Yorumlara 1-5, at adı ya da "katıl" yaz', x + w / 2, y + 126, 34, '#ffffff', 'center', { lw: 6 });
   if (G.lobbyEnd) {
     const left = Math.max(0, Math.ceil(G.lobbyEnd - G.t));
     const pulse = left <= 5 ? 1 + Math.sin(G.t * 10) * 0.06 : 1;
@@ -1167,7 +1206,7 @@ function drawHowTo() {
   ctx.fillStyle = 'rgba(10,18,8,0.84)'; rrPath(ctx, x, y, w, h, 18); ctx.fill();
   ctx.strokeStyle = '#d9b14a'; ctx.lineWidth = 2; ctx.stroke();
   txt('❓ NASIL OYNANIR', x + w / 2, y + 30, 23, '#ffd56b', 'center', { lw: 4 });
-  const lines = ['🔢 1-5 yaz → Atını seç', '❤️ Beğen → Atın koşar', '💬 Yorum → Tezahürat', '🎁 Hediye → Sprint!', '➕ Takip · 📣 Paylaş → Güç', '🏆 Kazananın taraftarları', '     anons edilir!'];
+  const lines = ['🔢 1-5 / at adı / katıl', '❤️ Beğen → Atın koşar', '💬 Yorum → Tezahürat', '🎁 Hediye → Sprint!', '➕ Takip · 📣 Paylaş → Güç', '🏆 Kazananın taraftarları', '     anons edilir!'];
   lines.forEach((l, i) => txt(l, x + 16, y + 66 + i * 34, 23, '#f3f8ef', 'left', { stroke: false, weight: 'bold' }));
 }
 function drawFloaters() {
