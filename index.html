@@ -1,0 +1,1146 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>At Yarışı</title>
+<style>
+  html, body { margin:0; height:100%; background:#0b0f0a; color:#eef3ea; overflow:hidden; }
+  body { display:flex; align-items:center; justify-content:center; }
+  canvas { display:block; background:#1d2b18; }
+  #testPanel { position:fixed; right:12px; bottom:12px; width:290px; z-index:10; background:rgba(16,22,14,.95); color:#eef3ea;
+    font:13px/1.35 "Segoe UI",system-ui,sans-serif; border:1px solid #d9b14a; border-radius:12px; padding:10px 10px 8px;
+    box-shadow:0 6px 24px rgba(0,0,0,.55); user-select:none; max-height:calc(100vh - 24px); overflow:auto; }
+  #testPanel .hd { display:flex; justify-content:space-between; align-items:center; font-weight:700; color:#ffd47a; margin-bottom:8px; }
+  #testPanel .hd button { cursor:pointer; background:none; border:none; color:#eef3ea; font-size:16px; padding:0 6px; }
+  #testPanel .grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  #testPanel .grid button { cursor:pointer; padding:7px 6px; border-radius:8px; border:1px solid #3f5a36; background:#22331d;
+    color:#f3f8ef; font:600 12px "Segoe UI",system-ui,sans-serif; text-align:left; }
+  #testPanel .grid button:hover { background:#2e4527; }
+  #testPanel .grid button:focus-visible { outline:2px solid #ffd47a; outline-offset:1px; }
+  #testPanel .grid button.wide { grid-column:span 2; }
+  #testPanel .grid button.warn { background:#5a1f1c; border-color:#8a3a2e; }
+  #testPanel .stats { margin-top:8px; font:11px/1.45 Consolas,monospace; color:#c4d3bd; white-space:pre; }
+  #testPanel.min .grid, #testPanel.min .stats { display:none; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1080" height="1920"></canvas>
+<script>
+'use strict';
+/* =====================================================================
+   CONFIG – Oyunun tüm ayarları buradan değiştirilebilir.
+   ===================================================================== */
+const CONFIG = {
+  websocket: {
+    enabled: true,
+    url: 'auto',                 // 'auto': köprüden açıldıysa aynı adres, değilse fallbackUrl
+    fallbackUrl: 'ws://localhost:8080',
+    reconnectMs: 5000
+  },
+  race: {
+    lobbySeconds: 25,            // ilk kişi at seçtikten sonra koşunun başlamasına kalan süre
+    baseUnits: 400,              // bitiş çizgisi için gereken en az birim
+    unitsPerParticipant: 45,     // koşu başında at seçmiş her kişi için eklenen birim
+    maxUnits: 4000,
+    maxSpeedFraction: 0.07,      // bir at saniyede en fazla pistin bu oranı kadar koşar (koşu en az ~14 sn)
+    releaseRate: 2.2,            // biriken gücün harcanma hızı (yumuşak hareket)
+    photoSeconds: 3,             // ilk at bitişe vardıktan sonra fotofiniş süresi
+    resultsSeconds: 20,          // sonuç ekranı süresi, sonra yeni koşu
+    meters: 1200                 // ekranda gösterilen koşu uzunluğu (metre)
+  },
+  points: {                      // atı ilerleten ham puanlar (birim)
+    like: 1,                     // beğeni başına
+    chat: 2,                     // tezahürat (numara içermeyen yorum), kişi başına 3 sn'de bir
+    follow: 8,
+    share: 12,
+    giftPerDiamond: 6,           // hediye: 6 × elmas^0.85 × adet
+    giftExponent: 0.85,
+    giftMaxFraction: 0.3         // tek hediye pistin en fazla %30'u kadar güç verir
+  },
+  balance: {
+    catchupMax: 0.6,             // geride kalan at en fazla %60 ek güç alır
+    catchupRange: 0.25,          // lidere göre pistin %25'i ve daha fazla gerideyse tam ek güç
+    likeWindowSeconds: 4,        // kişi başına beğeni sınırı penceresi
+    likeFullPerWindow: 40,       // bu pencerede tam sayılan beğeni
+    likeOverflowFactor: 0.3,     // fazlası bu oranla sayılır
+    autoAssign: true             // numara yazmadan beğeni/hediye gönderen, en az taraftarlı ata atanır
+  },
+  speech: {
+    enabled: true,
+    bridge: true,                // sesi köprü üretir (Mac 'Yelda' sesi) – LIVE Studio yayınına gider
+    browserFallback: true,       // köprü yoksa tarayıcının kendi sesi
+    volume: 1,
+    readNames: true,             // kullanıcı adlarını sesli oku (uygunsuz kelime filtresi açık)
+    maxQueue: 3,
+    statusEverySeconds: 14,
+    inviteEverySeconds: 30
+  },
+  audio: {
+    enabled: true,
+    volume: 0.5,
+    crowd: 0.22                  // tribün uğultusu seviyesi
+  },
+  spam: {
+    chatCooldownMs: 3000,
+    maxQueue: 400,
+    eventsPerFrame: 8,
+    maxParticles: 500,
+    maxFloaters: 30
+  },
+  notify: { maxVisible: 4, durationSeconds: 3.5, intervalMs: 300, maxQueue: 20 },
+  // sesli okunmayacak kelimeler (isimde geçerse "bir izleyici" denir)
+  bannedWords: ['amk', 'aq', 'orospu', 'piç', 'pic', 'sik', 'yarrak', 'göt', 'got', 'ibne', 'pezevenk', 'kahpe', 'siktir', 'amın', 'amin', 'gavat', 'sürtük', 'mal', 'salak', 'aptal', 'fuck', 'shit', 'bitch', 'porn', 'sex', 'seks']
+};
+
+/* =====================================================================
+   Yardımcılar
+   ===================================================================== */
+const W = 1080, H = 1920;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function fit() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width = Math.floor(W * s) + 'px';
+  canvas.style.height = Math.floor(H * s) + 'px';
+}
+window.addEventListener('resize', fit); fit();
+const rand = (a, b) => a + Math.random() * (b - a);
+const pick = a => a[(Math.random() * a.length) | 0];
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOut = t => 1 - Math.pow(1 - t, 3);
+const TAU = Math.PI * 2;
+const FONT = '"Segoe UI", "Trebuchet MS", Tahoma, sans-serif';
+const TFONT = 'Georgia, "Palatino Linotype", "Times New Roman", serif';
+const fmt = n => Math.round(n).toLocaleString('tr-TR');
+const shuffle = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; };
+function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return [c, c.getContext('2d')]; }
+function rrPath(g, x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  g.beginPath(); g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+function setFont(size, o) { ctx.font = ((o && o.weight) || 'bold') + ' ' + size + 'px ' + ((o && o.font) || FONT); }
+function txt(s, x, y, size, color, align, o) {
+  o = o || {};
+  setFont(size, o);
+  ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+  if (o.stroke !== false) { ctx.lineJoin = 'round'; ctx.lineWidth = o.lw || Math.max(3, size / 6); ctx.strokeStyle = o.sc || 'rgba(8,12,6,0.9)'; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+function fitText(s, maxW) {
+  if (ctx.measureText(s).width <= maxW) return s;
+  const a = Array.from(s);
+  while (a.length > 1 && ctx.measureText(a.join('') + '…').width > maxW) a.pop();
+  return a.join('') + '…';
+}
+function wrapText(s, maxW, maxLines) {
+  const words = s.split(' '), lines = [];
+  let cur = '';
+  for (const w of words) {
+    const t = cur ? cur + ' ' + w : w;
+    if (ctx.measureText(t).width <= maxW || !cur) cur = t;
+    else { lines.push(cur); cur = w; }
+  }
+  if (cur) lines.push(cur);
+  if (lines.length > maxLines) { const rest = lines.slice(maxLines - 1).join(' '); lines.length = maxLines - 1; lines.push(fitText(rest, maxW)); }
+  return lines;
+}
+function cleanName(n, max) {
+  n = String(n == null ? '' : n).replace(/[\u0000-\u001f\u007f<>]/g, '').replace(/\s+/g, ' ').trim();
+  if (!n) n = 'Anonim';
+  const a = Array.from(n);
+  return a.length > max ? a.slice(0, max).join('') + '…' : n;
+}
+const BANNED = CONFIG.bannedWords.map(w => w.toLocaleLowerCase('tr'));
+// Sesli okunacak isim: sadece harf/rakam/boşluk, uygunsuz kelime filtresi
+function speakName(raw) {
+  if (!CONFIG.speech.readNames) return 'bir izleyici';
+  let s = String(raw || '').normalize('NFC').replace(/[_.\-]+/g, ' ').replace(/[^\p{L}\p{N} ]/gu, '').replace(/\s+/g, ' ').trim();
+  s = Array.from(s).slice(0, 20).join('').trim();
+  if (!s || !/\p{L}/u.test(s)) return 'bir izleyici';
+  const low = s.toLocaleLowerCase('tr'), words = low.split(' ');
+  for (const b of BANNED) {
+    if (b.length <= 3 ? words.includes(b) : low.includes(b)) return 'bir izleyici';
+  }
+  return s;
+}
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  const k = f < 0 ? 0 : 255, t = Math.abs(f);
+  r = Math.round(r + (k - r) * t); g = Math.round(g + (k - g) * t); b = Math.round(b + (k - b) * t);
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+/* =====================================================================
+   Sabitler: atlar, kulvarlar, yerleşim
+   ===================================================================== */
+const HORSE_NAMES = ['Kara Şimşek', 'Altın Yele', 'Rüzgâr Gülü', 'Gece Yıldızı', 'Fırtına', 'Deli Poyraz', 'Gümüş Ok', 'Ateş Topu',
+  'Kızıl Kasırga', 'Şafak', 'Demir Bilek', 'Ak Kartal', 'Çılgın Tay', 'Yıldırım', 'Mavi Bora', 'Dolunay', 'Karayel', 'Lodos',
+  'Kar Tanesi', 'Tozkoparan', 'Sultan', 'Bal Badem', 'Alev', 'Gölge', 'Kuyruklu Yıldız', 'Rüya', 'Efe', 'Prens', 'Boncuk',
+  'Duman', 'Tarçın', 'Zeytin', 'Kırat', 'Doru Bey', 'Sis', 'Çakıl', 'Pamuk', 'Kehribar', 'Şahin', 'Yaban'];
+const SILKS = [
+  { silk: '#d6322f', num: '#ffffff', label: 'Kırmızı' },
+  { silk: '#f4f4f0', num: '#111111', label: 'Beyaz' },
+  { silk: '#2f5fd0', num: '#ffffff', label: 'Mavi' },
+  { silk: '#f2c230', num: '#111111', label: 'Sarı' },
+  { silk: '#2f9a4f', num: '#ffffff', label: 'Yeşil' }
+];
+const COATS = ['#8b4a2b', '#a0522d', '#3a2a24', '#9a948c', '#d4a85a', '#6e3b22', '#c9c4bd'];
+const LANES = 5;
+const TRACK_TOP = 570, LANE_H = 176, TRACK_BOTTOM = TRACK_TOP + LANES * LANE_H;
+const START_X = 215, FINISH_X = 1000, HORSE_S = 0.92, NOSE = 108;
+const laneGround = i => TRACK_TOP + i * LANE_H + 160;
+const noseX = h => START_X + clamp(h.pos / G.U, 0, 1.08) * (FINISH_X - START_X);
+
+/* =====================================================================
+   Ses efektleri (Web Audio, dosyasız)
+   ===================================================================== */
+const SFX = (function () {
+  const A = CONFIG.audio;
+  let ac = null, master = null, noiseBuf = null, crowdGain = null, muted = !A.enabled;
+  function init() {
+    if (ac) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      ac = new AC();
+      master = ac.createGain(); master.gain.value = A.volume;
+      const comp = ac.createDynamicsCompressor(); master.connect(comp); comp.connect(ac.destination);
+      noiseBuf = ac.createBuffer(1, ac.sampleRate * 4, ac.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      let b = 0;
+      for (let i = 0; i < d.length; i++) { b = 0.97 * b + 0.03 * (Math.random() * 2 - 1); d[i] = (Math.random() * 2 - 1) * 0.5 + b * 4; }
+    } catch (e) { ac = null; }
+  }
+  function startCrowd() {
+    if (!ac || crowdGain) return;
+    const src = ac.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+    const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 700; bp.Q.value = 0.6;
+    crowdGain = ac.createGain(); crowdGain.gain.value = 0;
+    src.connect(bp); bp.connect(crowdGain); crowdGain.connect(master); src.start();
+  }
+  function unlock() { init(); if (ac && ac.state === 'suspended') ac.resume().catch(() => {}); }
+  ['pointerdown', 'keydown', 'touchstart'].forEach(ev => window.addEventListener(ev, unlock, { passive: true }));
+  init();
+  setInterval(() => { if (ac && ac.state === 'suspended') ac.resume().catch(() => {}); }, 1000);
+  function ok() { if (muted || !ac || ac.state !== 'running') return false; startCrowd(); return true; }
+  function env(g, t0, a, dur, peak) { g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(peak, t0 + a); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur); }
+  function noise(t0, dur, f0, f1, peak, type, q) {
+    const s = ac.createBufferSource(); s.buffer = noiseBuf;
+    const f = ac.createBiquadFilter(); f.type = type || 'lowpass'; f.Q.value = q || 0.8; f.frequency.setValueAtTime(f0, t0);
+    if (f1) f.frequency.exponentialRampToValueAtTime(f1, t0 + dur);
+    const g = ac.createGain(); env(g, t0, 0.005, dur, peak);
+    s.connect(f); f.connect(g); g.connect(master); s.start(t0, Math.random() * 2); s.stop(t0 + dur + 0.05);
+  }
+  function tone(t0, dur, f0, f1, peak, type, a) {
+    const o = ac.createOscillator(); o.type = type || 'sine'; o.frequency.setValueAtTime(f0, t0);
+    if (f1) o.frequency.exponentialRampToValueAtTime(f1, t0 + dur);
+    const g = ac.createGain(); env(g, t0, a || 0.01, dur, peak);
+    o.connect(g); g.connect(master); o.start(t0); o.stop(t0 + dur + 0.05);
+  }
+  return {
+    unlock,
+    get state() { return !ac ? 'yok' : muted ? 'kapalı' : ac.state === 'running' ? 'açık' : 'tıklayın'; },
+    toggle() { muted = !muted; if (crowdGain) crowdGain.gain.value = 0; return muted; },
+    crowd(level, duck) { if (!ok() || !crowdGain) return; crowdGain.gain.setTargetAtTime(A.crowd * level * (duck ? 0.45 : 1), ac.currentTime, 0.4); },
+    hoof(v) { if (!ok()) return; const t = ac.currentTime; noise(t, 0.09, 420, 120, 0.25 * v, 'lowpass', 1); tone(t, 0.06, 95, 60, 0.18 * v); },
+    bell() {
+      if (!ok()) return; const t = ac.currentTime;
+      for (let i = 0; i < 6; i++) { tone(t + i * 0.13, 0.5, 1320, 0, 0.18, 'triangle', 0.002); tone(t + i * 0.13, 0.5, 1980, 0, 0.08, 'sine', 0.002); }
+    },
+    gift(big) {
+      if (!ok()) return; const t = ac.currentTime;
+      [880, 1108, 1318, big ? 1760 : 0].forEach((f, i) => f && tone(t + i * 0.07, 0.4, f, 0, 0.14, 'triangle'));
+      if (big) noise(t, 1.2, 2000, 300, 0.25, 'bandpass', 0.8);
+    },
+    join() { if (!ok()) return; const t = ac.currentTime; tone(t, 0.18, 660, 0, 0.1, 'triangle'); tone(t + 0.08, 0.22, 990, 0, 0.08, 'triangle'); },
+    fanfare() {
+      if (!ok()) return; const t = ac.currentTime;
+      [[523, 0], [659, 0.15], [784, 0.3], [1046, 0.45], [784, 0.7], [1046, 0.85]].forEach(([f, d]) => {
+        tone(t + d, 0.3, f, 0, 0.16, 'square', 0.02); tone(t + d, 0.3, f / 2, 0, 0.1, 'triangle', 0.02);
+      });
+      for (const f of [523, 659, 784, 1046]) tone(t + 1.1, 1.8, f, 0, 0.1, 'triangle', 0.05);
+    }
+  };
+})();
+
+/* =====================================================================
+   WebSocket (köprü) – olaylar gelir, spiker sesi istenir
+   ===================================================================== */
+let wsSock = null, wsStatus = 'bağlı değil';
+const wsOpen = () => !!wsSock && wsSock.readyState === 1;
+function wsSend(o) { if (wsOpen()) { try { wsSock.send(JSON.stringify(o)); } catch (e) { /* sessiz */ } } }
+function wsUrl() {
+  const u = CONFIG.websocket.url;
+  if (u && u !== 'auto') return u;
+  if (location.protocol === 'http:' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) return 'ws://' + location.host + '/ws';
+  return CONFIG.websocket.fallbackUrl;
+}
+
+/* =====================================================================
+   Spiker (sesli anlatım + ekranda yazı)
+   ===================================================================== */
+const SPEECH = (function () {
+  const S = CONFIG.speech;
+  const queue = [], waiting = new Map(), lastCat = {};
+  let busy = false, caption = '', captionAt = -1e9, reqId = 0;
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  function say(text, prio, cat, cooldown) {
+    if (!text) return;
+    if (cat && cooldown && lastCat[cat] != null && G.t - lastCat[cat] < cooldown) return;
+    if (cat) lastCat[cat] = G.t;
+    const item = { text, prio: prio || 1 };
+    if (!S.enabled) { caption = text; captionAt = performance.now(); return; }
+    if (queue.length >= S.maxQueue) {
+      let lo = 0;
+      for (let i = 1; i < queue.length; i++) if (queue[i].prio < queue[lo].prio) lo = i;
+      if (queue[lo].prio >= item.prio) return;
+      queue.splice(lo, 1);
+    }
+    let i = queue.findIndex(q => q.prio < item.prio);
+    if (i < 0) i = queue.length;
+    queue.splice(i, 0, item);
+    pump();
+  }
+  function pump() {
+    if (busy || !queue.length) return;
+    const it = queue.shift();
+    busy = true; caption = it.text; captionAt = performance.now();
+    play(it.text).then(() => { busy = false; setTimeout(pump, 250); });
+  }
+  async function play(text) {
+    if (S.bridge && wsOpen()) {
+      const b64 = await request(text);
+      if (b64 && await playWav(b64)) return;
+    }
+    if (S.browserFallback && 'speechSynthesis' in window) { await browserSay(text); return; }
+    await wait(Math.min(5000, 1200 + text.length * 55));
+  }
+  function request(text) {
+    return new Promise(res => {
+      const id = ++reqId;
+      const to = setTimeout(() => { waiting.delete(id); res(null); }, 6000);
+      waiting.set(id, b64 => { clearTimeout(to); res(b64); });
+      wsSend({ type: 'say', id, text });
+    });
+  }
+  function onTTS(m) { const f = waiting.get(m.id); if (f) { waiting.delete(m.id); f(m.audio || null); } }
+  function playWav(b64) {
+    return new Promise(res => {
+      try {
+        const bin = atob(b64), u8 = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        const url = URL.createObjectURL(new Blob([u8], { type: 'audio/wav' }));
+        const a = new Audio(url); a.volume = S.volume;
+        let done = false;
+        const fin = okk => { if (done) return; done = true; URL.revokeObjectURL(url); res(okk); };
+        a.onended = () => fin(true); a.onerror = () => fin(false);
+        setTimeout(() => fin(true), 15000);
+        a.play().catch(() => fin(false));
+      } catch (e) { res(false); }
+    });
+  }
+  function browserSay(text) {
+    return new Promise(res => {
+      try {
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = 'tr-TR'; u.rate = 1.08; u.volume = S.volume;
+        const v = speechSynthesis.getVoices().find(x => /^tr/i.test(x.lang));
+        if (v) u.voice = v;
+        let done = false;
+        const fin = () => { if (!done) { done = true; res(); } };
+        u.onend = fin; u.onerror = fin; setTimeout(fin, 12000);
+        speechSynthesis.speak(u);
+      } catch (e) { res(); }
+    });
+  }
+  return {
+    say, onTTS,
+    get speaking() { return busy; },
+    get caption() { return caption; },
+    get captionAge() { return (performance.now() - captionAt) / 1000; },
+    clear() { queue.length = 0; }
+  };
+})();
+
+/* =====================================================================
+   Oyun durumu
+   ===================================================================== */
+const G = {
+  phase: 'lobby', t: 0, phaseTime: 0, raceNo: 0,
+  horses: [], U: CONFIG.race.baseUnits, lobbyEnd: 0, photoEnd: 0, finishOrder: [], winner: null, winnerTop: [],
+  users: new Map(), lastChat: new Map(), likeBuckets: new Map(),
+  notifs: [], notifQueue: [], notifTimer: 0, particles: [], floaters: [],
+  leader: -1, lastLeaderSay: -99, milestones: new Set(), lastStatus: 0, lastInvite: -99, lastContrib: 0,
+  joinBuf: [], joinFlushAt: 0, excitement: 0, hoofAcc: 0, gateOpen: 0, flash: 0
+};
+try { G.raceNo = parseInt(localStorage.getItem('atYarisi.koşu') || '0', 10) || 0; } catch (e) { /* depolama yok */ }
+const queue = [];
+const pendingLikes = new Map();
+
+function newRace() {
+  G.raceNo++;
+  try { localStorage.setItem('atYarisi.koşu', String(G.raceNo)); } catch (e) { /* sessiz */ }
+  const names = shuffle(HORSE_NAMES).slice(0, LANES), coats = shuffle(COATS);
+  G.horses = names.map((name, i) => ({
+    lane: i, num: i + 1, name, coat: coats[i % coats.length], pos: 0, pending: 0, speedVis: 0, gait: rand(0, TAU),
+    boost: 0, supporters: new Map(), floatAcc: 0, floatAt: 0, finishT: null, place: null
+  }));
+  G.phase = 'lobby'; G.phaseTime = 0; G.lobbyEnd = 0; G.photoEnd = 0; G.finishOrder = []; G.winner = null; G.winnerTop = [];
+  G.U = CONFIG.race.baseUnits; G.leader = -1; G.milestones.clear(); G.likeBuckets.clear(); G.particles.length = 0; G.floaters.length = 0;
+  G.gateOpen = 0; G.lastInvite = G.t; G.lastContrib = G.t;
+  // sonuç ekranında seçim yapanlar yeni koşuda o atla başlar
+  for (const [k, u] of G.users) {
+    const nh = u.nextHorse; u.horse = null; u.nextHorse = null;
+    if (nh != null) joinHorse({ key: k, name: u.name, raw: u.raw }, nh, true);
+  }
+  const names2 = G.horses.map(h => h.num + ' ' + h.name).join(', ');
+  SPEECH.say('Koşu ' + G.raceNo + ' için atlar piste çıkıyor! ' + names2 + '. Atını seçmek için yorumlara bir ile beş arası bir numara yaz!', 3);
+}
+function getUser(e) {
+  let u = G.users.get(e.key);
+  if (!u) { u = { name: e.name, raw: e.raw, horse: null, nextHorse: null }; G.users.set(e.key, u); }
+  u.name = e.name; u.raw = e.raw;
+  return u;
+}
+function joinHorse(e, idx, silent) {
+  const u = getUser(e), h = G.horses[idx];
+  if (!h || u.horse === idx) return false;
+  if (u.horse != null) {
+    if (G.phase !== 'lobby') return false;            // koşu başladıktan sonra at değiştirilemez
+    G.horses[u.horse].supporters.delete(e.key);
+  }
+  u.horse = idx;
+  if (!h.supporters.has(e.key)) h.supporters.set(e.key, { name: e.name, raw: e.raw, pts: 0 });
+  if (!silent) {
+    notify(e.name + ' → ' + h.num + ' ' + h.name, SILKS[idx].silk, '🏇');
+    G.joinBuf.push({ raw: e.raw, idx });
+    if (!G.joinFlushAt) G.joinFlushAt = G.t + 3;
+    SFX.join();
+  }
+  if (G.phase === 'lobby' && !G.lobbyEnd) G.lobbyEnd = G.t + CONFIG.race.lobbySeconds;
+  return true;
+}
+function teamOf(e) {
+  const u = getUser(e);
+  if (u.horse != null) return u.horse;
+  if (!CONFIG.balance.autoAssign || (G.phase !== 'lobby' && G.phase !== 'race')) return null;
+  let min = Infinity, opts = [];
+  for (const h of G.horses) {
+    if (h.place != null) continue;
+    const n = h.supporters.size;
+    if (n < min) { min = n; opts = [h.lane]; } else if (n === min) opts.push(h.lane);
+  }
+  if (!opts.length) return null;
+  const idx = pick(opts);
+  joinHorse(e, idx, false);
+  return idx;
+}
+function leaderPos() { let m = 0; for (const h of G.horses) m = Math.max(m, h.pos + h.pending * 0); return m; }
+function catchup(h) {
+  const B = CONFIG.balance;
+  const behind = (leaderPos() - h.pos) / G.U;
+  return 1 + B.catchupMax * clamp(behind / B.catchupRange, 0, 1);
+}
+function contribute(e, raw, kind) {
+  if (!(raw > 0)) return null;
+  const idx = teamOf(e);
+  // koşuda her şey sayılır; seçim süresinde sadece hediye sayılır (at koşuya avantajlı başlar)
+  if (idx == null || !(G.phase === 'race' || (G.phase === 'lobby' && kind === 'gift'))) return null;
+  const h = G.horses[idx];
+  if (h.place != null) return null;
+  let eff = raw * catchup(h);
+  if (kind === 'gift') eff = Math.min(eff, G.U * CONFIG.points.giftMaxFraction);
+  h.pending += eff;
+  h.floatAcc += eff;
+  const sp = h.supporters.get(e.key);
+  if (sp) { sp.pts += raw; sp.name = e.name; sp.raw = e.raw; }
+  G.lastContrib = G.t;
+  return h;
+}
+
+/* =====================================================================
+   Olay sistemi
+   ===================================================================== */
+window.handleEvent = function (ev) { try { enqueue(ev); } catch (e) { /* sessiz */ } };
+function enqueue(ev) {
+  if (!ev || typeof ev !== 'object') return;
+  const type = String(ev.type || '').toLowerCase();
+  if (!['chat', 'like', 'gift', 'follow', 'share'].includes(type)) return;
+  const key = String(ev.user || ev.nickname || 'anonim').slice(0, 80);
+  const raw = String(ev.nickname || ev.user || 'Anonim');
+  const e = {
+    type, key, raw, name: cleanName(raw, 16),
+    text: String(ev.text || '').slice(0, 200),
+    count: Math.max(1, Math.min(Math.floor(Number(ev.count) || 1), 100000)),
+    giftName: ev.giftName ? cleanName(ev.giftName, 16) : '',
+    diamonds: Math.max(0, Math.floor(Number(ev.diamonds) || 0))
+  };
+  if (type === 'like') {
+    const p = pendingLikes.get(key);
+    if (p) { p.count += e.count; return; }
+    pendingLikes.set(key, e);
+  }
+  if (queue.length >= CONFIG.spam.maxQueue) {
+    let i = queue.findIndex(q => q.type !== 'gift');
+    if (i < 0) i = 0;
+    const r = queue.splice(i, 1)[0];
+    if (r.type === 'like' && pendingLikes.get(r.key) === r) pendingLikes.delete(r.key);
+  }
+  queue.push(e);
+}
+function processEvent(e) {
+  const P = G.phase, Pt = CONFIG.points;
+  switch (e.type) {
+    case 'chat': {
+      const m = e.text.match(/(?:^|[^0-9])([1-5])(?![0-9])/);
+      if (m) {
+        const idx = parseInt(m[1], 10) - 1;
+        if (P === 'results' || P === 'photo') { getUser(e).nextHorse = idx; break; }
+        joinHorse(e, idx, false);
+        break;
+      }
+      const t = performance.now(), last = G.lastChat.get(e.key);
+      if (last !== undefined && t - last < CONFIG.spam.chatCooldownMs) break;
+      G.lastChat.set(e.key, t);
+      if (getUser(e).horse != null) contribute(e, Pt.chat, 'chat');
+      break;
+    }
+    case 'like': {
+      const B = CONFIG.balance;
+      let b = G.likeBuckets.get(e.key);
+      if (!b || G.t - b.t0 > B.likeWindowSeconds) { b = { t0: G.t, n: 0 }; G.likeBuckets.set(e.key, b); }
+      const full = Math.max(0, Math.min(e.count, B.likeFullPerWindow - b.n));
+      b.n += e.count;
+      contribute(e, (full + (e.count - full) * B.likeOverflowFactor) * Pt.like, 'like');
+      break;
+    }
+    case 'gift': {
+      const d = e.diamonds || 1;
+      const units = Pt.giftPerDiamond * Math.pow(d, Pt.giftExponent) * Math.min(e.count, 100);
+      const h = contribute(e, units, 'gift');
+      const big = d * e.count >= 30;
+      const label = e.giftName ? e.giftName : 'hediye';
+      if (h && P === 'lobby') {
+        notify(e.name + ' ' + label + ' → ' + h.name + ' avantajlı başlayacak!', '#ffd56b', '🎁');
+        SFX.gift(big);
+        SPEECH.say(speakName(e.raw) + ' hediye gönderdi! ' + h.name + ' koşuya avantajlı başlayacak!', big ? 2 : 1, big ? null : 'gift', 7);
+      } else if (h) {
+        h.boost = Math.max(h.boost, clamp(units / G.U * 25, 1.2, 6));
+        notify(e.name + ' ' + label + (e.count > 1 ? ' ×' + e.count : '') + ' → ' + h.name + ' sprint!', '#ffd56b', '🎁');
+        SFX.gift(big);
+        const who = speakName(e.raw);
+        if (big) SPEECH.say(who + ' hediye gönderdi! ' + h.num + ' numara ' + h.name + ' sprint atıyor!', 2);
+        else SPEECH.say(who + ' hediye gönderdi, ' + h.name + ' hızlanıyor!', 1, 'gift', 7);
+      }
+      break;
+    }
+    case 'follow': {
+      const h = contribute(e, Pt.follow, 'follow');
+      notify(e.name + ' takip etti!' + (h ? ' +' + h.name : ''), '#9be39b', '➕');
+      break;
+    }
+    case 'share': {
+      const h = contribute(e, Pt.share, 'share');
+      notify(e.name + ' yayını paylaştı!' + (h ? ' +' + h.name : ''), '#a8d8ff', '📣');
+      break;
+    }
+  }
+}
+function notify(text, color, icon) {
+  G.notifQueue.push({ text, color: color || '#ffd56b', icon: icon || '🏇' });
+  if (G.notifQueue.length > CONFIG.notify.maxQueue) G.notifQueue.shift();
+}
+function floater(x, y, text, color, size) {
+  if (G.floaters.length >= CONFIG.spam.maxFloaters) G.floaters.shift();
+  G.floaters.push({ x, y, text, color, size, life: 1.3, max: 1.3 });
+}
+function particle(p) { if (G.particles.length < CONFIG.spam.maxParticles) { p.max = p.life; G.particles.push(p); } }
+
+/* =====================================================================
+   Akış: lobi → koşu → fotofiniş → sonuç
+   ===================================================================== */
+function participants() { let n = 0; for (const h of G.horses) n += h.supporters.size; return n; }
+function startRace() {
+  const R = CONFIG.race;
+  G.U = Math.round(clamp(R.baseUnits + R.unitsPerParticipant * participants(), R.baseUnits, R.maxUnits));
+  G.phase = 'race'; G.phaseTime = 0; G.gateOpen = 0.001; G.lastContrib = G.t; G.lastStatus = G.t;
+  SFX.bell();
+  SPEECH.clear();
+  SPEECH.say('Kapılar açıldı, koşu başladı! Beğeni gönder, atını koştur!', 3);
+}
+function finishRace() {
+  G.phase = 'results'; G.phaseTime = 0;
+  const order = G.horses.slice().sort((a, b) => {
+    if (a.finishT != null && b.finishT != null) return a.finishT - b.finishT;
+    if (a.finishT != null) return -1;
+    if (b.finishT != null) return 1;
+    return b.pos - a.pos;
+  });
+  order.forEach((h, i) => (h.place = i + 1));
+  G.finishOrder = order;
+  const w = order[0];
+  G.winner = w;
+  G.winnerTop = Array.from(w.supporters.values()).filter(s => s.pts > 0).sort((a, b) => b.pts - a.pts).slice(0, 3);
+  SFX.fanfare();
+  G.flash = 0.5;
+  for (let i = 0; i < 160; i++) particle({ x: rand(0, W), y: rand(-200, 0), vx: rand(-40, 40), vy: rand(120, 300), g: 60, life: rand(3, 5), size: rand(6, 12), color: pick(['#ffd34d', '#ff5a5a', '#5ab0ff', '#7ee07e', '#ffffff', '#ff9ad5']), confetti: true, rot: rand(0, TAU), vr: rand(-6, 6) });
+  const names = G.winnerTop.map(s => speakName(s.raw));
+  let line = 'Ve kazanan, ' + w.num + ' numara, ' + w.name + '! ';
+  if (names.length === 1) line += 'En çok destekleyen ' + names[0] + '. Tebrikler!';
+  else if (names.length > 1) line += 'En çok destekleyenler: ' + names.slice(0, -1).join(', ') + ' ve ' + names[names.length - 1] + '. Tebrikler!';
+  else line += 'Tebrikler!';
+  SPEECH.clear();
+  SPEECH.say(line, 3);
+  notify('🏆 Kazanan: ' + w.num + ' ' + w.name, '#ffd34d', '🏆');
+}
+
+/* =====================================================================
+   Güncelleme
+   ===================================================================== */
+function update(dt) {
+  G.t += dt; G.phaseTime += dt;
+  for (let i = 0; i < CONFIG.spam.eventsPerFrame && queue.length; i++) {
+    const e = queue.shift();
+    if (e.type === 'like' && pendingLikes.get(e.key) === e) pendingLikes.delete(e.key);
+    try { processEvent(e); } catch (err) { console.error(err); }
+  }
+  const R = CONFIG.race, P = G.phase;
+  // katılım anonsu (toplu)
+  if (G.joinFlushAt && G.t >= G.joinFlushAt) {
+    const b = G.joinBuf; G.joinBuf = []; G.joinFlushAt = 0;
+    if (b.length === 1) { const h = G.horses[b[0].idx]; if (h) SPEECH.say(speakName(b[0].raw) + ', ' + h.num + ' numara ' + h.name + ' takımında!', 1, 'join', 4); }
+    else if (b.length > 1) SPEECH.say(speakName(b[0].raw) + ' ve ' + (b.length - 1) + ' kişi daha atını seçti!', 1, 'join', 4);
+  }
+  if (P === 'lobby') {
+    if (!G.lobbyEnd) {
+      if (G.t - G.lastInvite > CONFIG.speech.inviteEverySeconds) { G.lastInvite = G.t; SPEECH.say('Atını seçmek için yorumlara bir ile beş arası bir numara yaz! İlk seçimle geri sayım başlar.', 1); }
+    } else {
+      const left = G.lobbyEnd - G.t;
+      if (left <= 10 && !G.milestones.has('l10')) { G.milestones.add('l10'); SPEECH.say('On saniye kaldı! Atını seçmeyen kalmasın!', 2); }
+      if (left <= 4 && !G.milestones.has('l3')) { G.milestones.add('l3'); SPEECH.say('Atlar kapıda... Hazır!', 3); }
+      if (left <= 0) { G.milestones.clear(); startRace(); }
+    }
+  } else if (P === 'race' || P === 'photo') {
+    const maxRate = G.U * R.maxSpeedFraction;
+    for (const h of G.horses) {
+      let mv = 0;
+      if (h.pending > 0 && h.place == null) {
+        mv = Math.min(h.pending, Math.max(h.pending * R.releaseRate, G.U * 0.01) * dt, maxRate * dt * (h.boost > 0 ? 1.15 : 1));
+        h.pos += mv; h.pending -= mv;
+      }
+      if (h.place != null || h.finishT != null) { h.pos += maxRate * 0.25 * dt * Math.max(0, 1 - (G.t - h.finishT) / 2); }
+      h.speedVis = lerp(h.speedVis, clamp(mv / dt / maxRate, 0, 1.2), Math.min(1, dt * 6));
+      h.boost = Math.max(0, h.boost - dt);
+      if (h.finishT == null && h.pos >= G.U) {
+        h.finishT = G.t;
+        if (!G.photoEnd) {
+          G.photoEnd = G.t + R.photoSeconds; G.phase = 'photo'; G.flash = 0.35;
+          SPEECH.say(h.num + ' numara ' + h.name + ' çizgiyi geçti!', 3);
+        }
+      }
+      if (h.floatAcc >= 1 && G.t - h.floatAt > 0.5) {
+        floater(noseX(h) - 60, laneGround(h.lane) - 150, '+' + Math.round(h.floatAcc), SILKS[h.lane].silk, 26);
+        h.floatAcc = 0; h.floatAt = G.t;
+      }
+    }
+    if (P === 'race') raceCommentary();
+    if (G.phase === 'photo' && G.t >= G.photoEnd) finishRace();
+  } else if (P === 'results') {
+    if (G.phaseTime >= R.resultsSeconds) newRace();
+  }
+  // görünüm: koşmayan atlar dururken nefes alır
+  for (const h of G.horses) {
+    if (P !== 'race' && P !== 'photo') h.speedVis = lerp(h.speedVis, 0, Math.min(1, dt * 4));
+    h.gait += dt * (h.speedVis > 0.03 ? 7 + 9 * h.speedVis : 0);
+    if (h.speedVis > 0.15 && Math.random() < h.speedVis * dt * 30) {
+      const x = noseX(h) - NOSE * HORSE_S - 50, y = laneGround(h.lane);
+      particle({ x, y: y - 4, vx: rand(-90, -30), vy: rand(-50, -15), g: 60, life: rand(0.5, 0.9), size: rand(8, 16), color: '#c9b48a', dust: true });
+    }
+    if (h.boost > 0 && Math.random() < dt * 30) {
+      particle({ x: noseX(h) - rand(80, 200), y: laneGround(h.lane) - rand(30, 130), vx: rand(-200, -80), vy: rand(-20, 20), g: 0, life: 0.5, size: rand(3, 6), color: '#ffe27a', spark: true });
+    }
+  }
+  if (G.gateOpen > 0 && G.gateOpen < 1) G.gateOpen = Math.min(1, G.gateOpen + dt * 2);
+  // heyecan: önde giden atın pistteki yeri ve son etkileşim
+  const lp = G.horses.length ? leaderPos() / G.U : 0;
+  const active = G.t - G.lastContrib < 3 ? 1 : 0.4;
+  const target = G.phase === 'results' ? (G.phaseTime < 5 ? 1 : 0.4) : G.phase === 'race' || G.phase === 'photo' ? clamp(0.35 + lp * 0.6, 0, 1) * active : 0.25;
+  G.excitement = lerp(G.excitement, target, Math.min(1, dt * 1.5));
+  SFX.crowd(G.excitement, SPEECH.speaking);
+  // nal sesleri (koşan at sayısına göre)
+  let moving = 0, sp = 0;
+  for (const h of G.horses) if (h.speedVis > 0.1) { moving++; sp = Math.max(sp, h.speedVis); }
+  if (moving) { G.hoofAcc += dt * (5 + 6 * sp); if (G.hoofAcc >= 1) { G.hoofAcc -= 1; SFX.hoof(Math.min(1, 0.4 + moving * 0.15)); } }
+  // parçacıklar, yazılar, bildirimler
+  for (let i = G.particles.length - 1; i >= 0; i--) {
+    const p = G.particles[i];
+    p.life -= dt;
+    if (p.life <= 0 || p.y > H + 50) { G.particles.splice(i, 1); continue; }
+    p.vy += p.g * dt; p.x += p.vx * dt; p.y += p.vy * dt;
+    if (p.rot != null) p.rot += p.vr * dt;
+  }
+  for (let i = G.floaters.length - 1; i >= 0; i--) { const f = G.floaters[i]; f.y -= 50 * dt; f.life -= dt; if (f.life <= 0) G.floaters.splice(i, 1); }
+  G.notifTimer -= dt;
+  if (G.notifTimer <= 0 && G.notifQueue.length) {
+    const n = G.notifQueue.shift(); n.born = G.t; n.fit = null;
+    G.notifs.unshift(n);
+    if (G.notifs.length > CONFIG.notify.maxVisible) G.notifs.pop();
+    G.notifTimer = CONFIG.notify.intervalMs / 1000;
+  }
+  for (let i = G.notifs.length - 1; i >= 0; i--) if (G.t - G.notifs[i].born > CONFIG.notify.durationSeconds) G.notifs.splice(i, 1);
+  G.flash = Math.max(0, G.flash - dt * 1.2);
+}
+function ranking() { return G.horses.slice().sort((a, b) => b.pos - a.pos); }
+function raceCommentary() {
+  const r = ranking(), lead = r[0], second = r[1];
+  const lp = lead.pos / G.U;
+  if (lp > 0.03 && lead.lane !== G.leader) {
+    const first = G.leader < 0;
+    G.leader = lead.lane;
+    if (G.t - G.lastLeaderSay > 5 || first) { G.lastLeaderSay = G.t; SPEECH.say(lead.num + ' numara ' + lead.name + (first ? ' iyi başladı, önde!' : ' öne geçti!'), 2); }
+  }
+  if (lp >= 0.5 && !G.milestones.has('half')) { G.milestones.add('half'); SPEECH.say('Koşunun yarısı geride kaldı! Önde ' + lead.name + ', arkasında ' + second.name + '!', 2); }
+  if (lp >= 0.8 && !G.milestones.has('final')) { G.milestones.add('final'); SPEECH.say('Son düzlüğe girdiler! Şimdi beğeni zamanı!', 2); }
+  if (lp >= 0.85 && second && (lead.pos - second.pos) / G.U < 0.03 && !G.milestones.has('close')) { G.milestones.add('close'); SPEECH.say(lead.name + ' ile ' + second.name + ' burun buruna!', 2); }
+  if (G.t - G.lastContrib > 10) SPEECH.say('Atlar yavaşladı! Beğeni gönder, atını koştur!', 1, 'idle', 20);
+  if (G.t - G.lastStatus > CONFIG.speech.statusEverySeconds && !SPEECH.speaking && lp > 0.05) {
+    G.lastStatus = G.t;
+    const m = Math.max(0, Math.round((1 - lp) * CONFIG.race.meters / 10) * 10);
+    SPEECH.say('Önde ' + lead.num + ' numara ' + lead.name + ', ikinci ' + second.name + '. Bitişe ' + m + ' metre!', 1, 'status', 8);
+  }
+}
+
+/* =====================================================================
+   Çizim – arka plan (bir kez çizilir)
+   ===================================================================== */
+const CROWD = [];
+const BG = (function () {
+  const [c, g] = mk(W, H);
+  let gr = g.createLinearGradient(0, 0, 0, 380);
+  gr.addColorStop(0, '#5fa8e0'); gr.addColorStop(1, '#cfe8f7');
+  g.fillStyle = gr; g.fillRect(0, 0, W, 400);
+  g.fillStyle = 'rgba(255,255,255,0.85)';
+  for (const [x, y, s] of [[160, 230, 1], [520, 200, 1.3], [880, 250, 0.9]]) {
+    for (const [dx, dy, r] of [[0, 0, 34], [36, -12, 40], [76, 0, 32], [36, 10, 30]]) { g.beginPath(); g.arc(x + dx * s, y + dy * s, r * s, 0, TAU); g.fill(); }
+  }
+  g.fillStyle = '#4f7f45';
+  for (let x = -40; x < W + 80; x += 70) { g.beginPath(); g.arc(x, 360, rand(40, 70), 0, TAU); g.fill(); }
+  // tribün
+  g.fillStyle = '#e9e1d2'; g.fillRect(0, 352, W, 210);
+  g.fillStyle = '#8f2f2f';
+  g.beginPath(); g.moveTo(0, 330); g.lineTo(W, 330); g.lineTo(W - 10, 362); g.lineTo(10, 362); g.closePath(); g.fill();
+  for (let x = 0; x < W; x += 54) { g.fillStyle = (x / 54) % 2 ? '#f4efe6' : '#b23b3b'; g.beginPath(); g.moveTo(x, 362); g.lineTo(x + 54, 362); g.lineTo(x + 27, 384); g.closePath(); g.fill(); }
+  g.fillStyle = '#d3c9b6';
+  for (let r = 0; r < 4; r++) g.fillRect(0, 398 + r * 40, W, 8);
+  g.fillStyle = '#7d6d58';
+  for (let x = 30; x < W; x += 170) g.fillRect(x, 362, 10, 200);
+  for (let r = 0; r < 4; r++) for (let x = 8; x < W; x += 15) {
+    const col = pick(['#d6322f', '#2f5fd0', '#f2c230', '#2f9a4f', '#ffffff', '#ff8a3d', '#8a4fd0', '#222', '#e86fb0']);
+    if (r === 3) CROWD.push({ x: x + rand(-3, 3), y: 540, c: col, skin: pick(['#f0c9a0', '#d9a273', '#b07850', '#8a5a3a']), ph: rand(0, TAU) });
+    else { g.fillStyle = col; g.fillRect(x, 410 + r * 40 - 14, 10, 14); g.fillStyle = pick(['#f0c9a0', '#d9a273', '#b07850']); g.beginPath(); g.arc(x + 5, 410 + r * 40 - 19, 5, 0, TAU); g.fill(); }
+  }
+  // pist
+  g.fillStyle = '#5c9a3d'; g.fillRect(0, TRACK_TOP - 8, W, TRACK_BOTTOM - TRACK_TOP + 16);
+  for (let x = 0; x < W; x += 120) { g.fillStyle = 'rgba(255,255,255,0.05)'; g.fillRect(x, TRACK_TOP, 60, TRACK_BOTTOM - TRACK_TOP); }
+  for (let i = 0; i < 900; i++) { g.fillStyle = pick(['rgba(30,70,20,0.18)', 'rgba(150,200,90,0.14)']); g.fillRect(rand(0, W), rand(TRACK_TOP, TRACK_BOTTOM), 2, rand(3, 7)); }
+  for (let i = 1; i < LANES; i++) {
+    const y = TRACK_TOP + i * LANE_H;
+    g.strokeStyle = 'rgba(255,255,255,0.45)'; g.lineWidth = 3; g.setLineDash([26, 18]);
+    g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke();
+  }
+  g.setLineDash([]);
+  // korkuluklar
+  for (const y of [TRACK_TOP - 14, TRACK_BOTTOM + 6]) {
+    g.fillStyle = '#ffffff'; g.fillRect(0, y, W, 7);
+    g.fillStyle = '#d9d9d9'; for (let x = 10; x < W; x += 60) g.fillRect(x, y, 6, 22);
+  }
+  // mesafe çizgileri (tabelalar seyircilerin önünde ayrıca çizilir)
+  for (const f of [0.25, 0.5, 0.75]) {
+    const x = START_X + f * (FINISH_X - START_X);
+    g.fillStyle = 'rgba(255,255,255,0.18)'; g.fillRect(x - 2, TRACK_TOP, 4, TRACK_BOTTOM - TRACK_TOP);
+  }
+  // bitiş çizgisi
+  const sq = 16;
+  for (let y = TRACK_TOP, r = 0; y < TRACK_BOTTOM; y += sq, r++) for (let k = 0; k < 2; k++) { g.fillStyle = (r + k) % 2 ? '#111' : '#fff'; g.fillRect(FINISH_X - sq + k * sq, y, sq, sq); }
+  // alt panel zemini
+  gr = g.createLinearGradient(0, TRACK_BOTTOM + 28, 0, H);
+  gr.addColorStop(0, '#1b2716'); gr.addColorStop(1, '#0d140b');
+  g.fillStyle = gr; g.fillRect(0, TRACK_BOTTOM + 28, W, H - TRACK_BOTTOM - 28);
+  return c;
+})();
+
+/* =====================================================================
+   Çizim – at ve jokey
+   ===================================================================== */
+function limb(x0, y0, a1, l1, a2, l2, w1, w2, color, hoof) {
+  const x1 = x0 + Math.sin(a1) * l1, y1 = y0 + Math.cos(a1) * l1;
+  const x2 = x1 + Math.sin(a2) * l2, y2 = y1 + Math.cos(a2) * l2;
+  ctx.strokeStyle = color; ctx.lineCap = 'round';
+  ctx.lineWidth = w1; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  ctx.lineWidth = w2; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.fillStyle = hoof; ctx.beginPath(); ctx.ellipse(x2 + 1, y2, 5, 3.5, 0, 0, TAU); ctx.fill();
+}
+function drawHorse(h, x, y, s) {
+  const run = h.speedVis > 0.03, th = h.gait;
+  const coat = h.coat, dark = shade(coat, -0.35), darker = shade(coat, -0.55), silk = SILKS[h.lane];
+  const bob = run ? Math.sin(th * 2) * 3.5 : Math.sin(G.t * 1.6 + h.lane) * 0.8;
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(s, s);
+  ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.beginPath(); ctx.ellipse(4, 3, 78, 9, 0, 0, TAU); ctx.fill();
+  if (h.boost > 0) { ctx.fillStyle = 'rgba(255,226,122,' + Math.min(0.35, h.boost * 0.12) + ')'; ctx.beginPath(); ctx.ellipse(10, -70, 110, 70, 0, 0, TAU); ctx.fill(); }
+  ctx.translate(0, -bob);
+  const leg = (off, front) => {
+    if (!run) return [front ? 0.04 : -0.04, front ? 0.04 : -0.02];
+    const p = th + off * TAU;
+    if (front) { const a1 = 0.62 * Math.sin(p); return [a1, a1 - 1.25 * Math.max(0, Math.sin(p - 0.7))]; }
+    const a1 = -0.55 * Math.sin(p); return [a1, a1 + 0.9 * Math.max(0, Math.sin(p + 0.5))];
+  };
+  // uzak bacaklar
+  let [a, b] = leg(0.55, true); limb(36, -56, a, 30, b, 31, 10, 7, dark, '#222');
+  [a, b] = leg(0.05, false); limb(-36, -58, a, 30, b, 31, 12, 7, dark, '#222');
+  // kuyruk
+  const wave = run ? Math.sin(th * 2) * 8 : Math.sin(G.t * 2 + h.lane) * 3;
+  ctx.strokeStyle = darker; ctx.lineCap = 'round'; ctx.lineWidth = 10;
+  ctx.beginPath(); ctx.moveTo(-52, -78); ctx.quadraticCurveTo(-82, -70 + wave * 0.4, -86 + (run ? -6 : 4), -34 + wave); ctx.stroke();
+  // gövde
+  ctx.fillStyle = coat;
+  ctx.beginPath(); ctx.ellipse(0, -66, 52, 23, 0, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(-34, -68, 25, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(34, -66, 23, 0, TAU); ctx.fill();
+  // boyun ve baş (koşarken öne uzanır)
+  ctx.save();
+  ctx.translate(40, -74); ctx.rotate(run ? 0.12 + Math.sin(th * 2) * 0.05 : 0); ctx.translate(-40, 74);
+  ctx.fillStyle = coat;
+  ctx.beginPath(); ctx.moveTo(26, -82); ctx.lineTo(52, -116); ctx.lineTo(70, -122); ctx.lineTo(80, -104); ctx.lineTo(54, -60); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(60, -124); ctx.lineTo(76, -130); ctx.lineTo(108, -104); ctx.lineTo(108, -95); ctx.lineTo(98, -91); ctx.lineTo(70, -101); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = dark; ctx.beginPath(); ctx.moveTo(64, -125); ctx.lineTo(66, -140); ctx.lineTo(73, -127); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = darker; ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.moveTo(28, -88); ctx.quadraticCurveTo(46, -110, 64, -124); ctx.stroke();
+  ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(84, -114, 2.8, 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(103, -98, 1.8, 0, TAU); ctx.fill();
+  ctx.strokeStyle = '#3a2618'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(72, -104); ctx.lineTo(100, -96); ctx.moveTo(76, -126); ctx.lineTo(88, -103); ctx.stroke();
+  ctx.restore();
+  // eyer örtüsü ve numara
+  ctx.fillStyle = silk.silk; rrPath(ctx, -20, -86, 38, 30, 5); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = silk.num; ctx.font = 'bold 22px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(String(h.num), -1, -70);
+  // yakın bacaklar
+  [a, b] = leg(0.8, true); limb(40, -54, a, 30, b, 31, 11, 8, coat, '#1a1a1a');
+  [a, b] = leg(0.3, false); limb(-30, -58, a, 30, b, 31, 13, 8, coat, '#1a1a1a');
+  // jokey
+  const jb = run ? Math.sin(th * 2 + 1) * 2.5 : 0;
+  ctx.translate(0, jb);
+  ctx.strokeStyle = '#f2efe6'; ctx.lineWidth = 9; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(2, -90); ctx.lineTo(18, -96); ctx.lineTo(10, -78); ctx.stroke();
+  ctx.fillStyle = '#2a1d14'; ctx.beginPath(); ctx.ellipse(12, -76, 7, 4, 0.2, 0, TAU); ctx.fill();
+  ctx.strokeStyle = silk.silk; ctx.lineWidth = 16;
+  ctx.beginPath(); ctx.moveTo(2, -94); ctx.lineTo(24, -114); ctx.stroke();
+  ctx.lineWidth = 7; ctx.beginPath(); ctx.moveTo(20, -110); ctx.lineTo(42, -104); ctx.lineTo(56, -100); ctx.stroke();
+  ctx.strokeStyle = '#3a2618'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(56, -100); ctx.lineTo(98, -94); ctx.stroke();
+  ctx.fillStyle = '#e9b98f'; ctx.beginPath(); ctx.arc(33, -118, 7, 0, TAU); ctx.fill();
+  ctx.fillStyle = silk.silk; ctx.beginPath(); ctx.arc(31, -122, 9, Math.PI, TAU); ctx.fill();
+  ctx.fillRect(31, -124, 13, 4);
+  ctx.restore();
+}
+
+/* =====================================================================
+   Çizim – sahne ve arayüz
+   ===================================================================== */
+function drawCrowd() {
+  const amp = 2 + G.excitement * 9;
+  for (const p of CROWD) {
+    const jump = Math.max(0, Math.sin(G.t * (3 + G.excitement * 5) + p.ph)) * amp;
+    ctx.fillStyle = p.c; ctx.fillRect(p.x, p.y - 16 - jump, 11, 16);
+    ctx.fillStyle = p.skin; ctx.beginPath(); ctx.arc(p.x + 5.5, p.y - 22 - jump, 5.5, 0, TAU); ctx.fill();
+    if (G.excitement > 0.6 && (p.ph * 10 | 0) % 3 === 0) { ctx.fillStyle = p.c; ctx.fillRect(p.x + 9, p.y - 34 - jump, 3, 14); }
+  }
+}
+function drawSigns() {
+  for (const f of [0.25, 0.5, 0.75]) {
+    const x = START_X + f * (FINISH_X - START_X);
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(x - 4, TRACK_TOP - 46, 8, 34);
+    ctx.fillStyle = '#c62828'; rrPath(ctx, x - 36, TRACK_TOP - 74, 72, 30, 6); ctx.fill();
+    txt(Math.round(f * CONFIG.race.meters) + ' m', x, TRACK_TOP - 58, 19, '#ffffff', 'center', { stroke: false });
+  }
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(FINISH_X - 4, TRACK_TOP - 96, 8, 86);
+  ctx.fillStyle = '#c62828'; ctx.beginPath(); ctx.arc(FINISH_X, TRACK_TOP - 108, 34, 0, TAU); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.stroke();
+  txt('BİTİŞ', FINISH_X, TRACK_TOP - 107, 17, '#ffffff', 'center', { stroke: false });
+}
+function drawGate() {
+  const open = G.phase === 'lobby' ? 0 : G.gateOpen;
+  if (open >= 1) return;
+  for (let i = 0; i < LANES; i++) {
+    const top = TRACK_TOP + i * LANE_H + 8, bot = TRACK_TOP + (i + 1) * LANE_H - 6;
+    ctx.fillStyle = 'rgba(30,70,40,' + (0.9 * (1 - open)) + ')';
+    ctx.fillRect(START_X + 12, top, 12, (bot - top) * (1 - open));
+    ctx.fillRect(START_X + 12, bot - (bot - top) * (1 - open) * 0.05, 12, 4);
+    ctx.fillStyle = 'rgba(220,220,210,' + (1 - open) + ')';
+    for (let y = top + 10; y < top + (bot - top) * (1 - open); y += 22) ctx.fillRect(START_X + 10, y, 16, 4);
+  }
+  ctx.fillStyle = 'rgba(40,90,52,' + (1 - open) + ')'; ctx.fillRect(START_X - 160, TRACK_TOP - 6, 190, 12);
+}
+function drawLaneTags() {
+  for (const h of G.horses) {
+    const y = TRACK_TOP + h.lane * LANE_H + 8, s = SILKS[h.lane];
+    ctx.fillStyle = 'rgba(10,20,8,0.62)'; rrPath(ctx, 10, y, 370, 32, 16); ctx.fill();
+    ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(28, y + 16, 13, 0, TAU); ctx.fill();
+    txt(String(h.num), 28, y + 17, 17, s.num, 'center', { stroke: false });
+    setFont(20);
+    txt(fitText(h.name, 210), 50, y + 17, 20, '#ffffff', 'left', { lw: 3 });
+    txt('👥 ' + h.supporters.size, 370, y + 17, 19, '#ffe9a8', 'right', { lw: 3 });
+    if (h.place != null && G.phase === 'results') txt(h.place + '.', 400, y + 17, 22, '#ffd34d', 'left', { lw: 4 });
+  }
+}
+function drawHorses() {
+  for (const h of G.horses) {
+    const x = noseX(h) - NOSE * HORSE_S, y = laneGround(h.lane);
+    drawHorse(h, x, y, HORSE_S);
+    if (G.leader === h.lane && (G.phase === 'race' || G.phase === 'photo')) txt('👑', x + 30, y - 150, 26, '#fff', 'center', { stroke: false });
+  }
+}
+function drawParticles() {
+  for (const p of G.particles) {
+    const a = clamp(p.life / p.max, 0, 1);
+    ctx.globalAlpha = p.dust ? a * 0.55 : a;
+    ctx.fillStyle = p.color;
+    if (p.confetti) { ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillRect(-p.size / 2, -p.size / 4, p.size, p.size / 2); ctx.restore(); }
+    else { ctx.beginPath(); ctx.arc(p.x, p.y, p.size * (p.dust ? 1.4 - a * 0.5 : 1), 0, TAU); ctx.fill(); }
+  }
+  ctx.globalAlpha = 1;
+}
+function drawTop() {
+  const gr = ctx.createLinearGradient(0, 0, 0, 200);
+  gr.addColorStop(0, 'rgba(10,18,8,0.85)'); gr.addColorStop(1, 'rgba(10,18,8,0)');
+  ctx.fillStyle = gr; ctx.fillRect(0, 0, W, 200);
+  txt('🏇 AT YARIŞI', 540, 64, 74, '#ffd56b', 'center', { font: TFONT, lw: 10 });
+  let sub = 'Koşu #' + G.raceNo + ' · ';
+  if (G.phase === 'lobby') sub += 'Atını seç: yorumlara 1-5 yaz!';
+  else if (G.phase === 'race' || G.phase === 'photo') {
+    const lead = ranking()[0];
+    sub += 'Lider: ' + lead.num + ' ' + lead.name + ' · ' + Math.min(CONFIG.race.meters, Math.round(lead.pos / G.U * CONFIG.race.meters)) + ' / ' + CONFIG.race.meters + ' m';
+  } else sub += 'Koşu tamamlandı!';
+  setFont(32); txt(fitText(sub, 1000), 540, 128, 32, '#f3f8ef', 'center', { lw: 6 });
+}
+function drawNotifs() {
+  if (G.phase === 'results') return;
+  let y = 170;
+  for (const n of G.notifs) {
+    const age = G.t - n.born, dur = CONFIG.notify.durationSeconds;
+    const a = age < 0.2 ? age / 0.2 : age > dur - 0.4 ? (dur - age) / 0.4 : 1;
+    ctx.globalAlpha = clamp(a, 0, 1);
+    ctx.fillStyle = 'rgba(10,18,8,0.85)'; rrPath(ctx, 20, y, 640, 50, 14); ctx.fill();
+    ctx.strokeStyle = n.color; ctx.lineWidth = 3; ctx.stroke();
+    txt(n.icon, 48, y + 26, 24, '#fff', 'center', { stroke: false });
+    setFont(22);
+    if (!n.fit) n.fit = fitText(n.text, 580);
+    txt(n.fit, 72, y + 26, 22, '#f8fbf5', 'left', { lw: 4 });
+    y += 58;
+  }
+  ctx.globalAlpha = 1;
+}
+function drawLobbyBanner() {
+  if (G.phase !== 'lobby') return;
+  const x = 300, y = TRACK_TOP + 300, w = 740, h = 250;
+  ctx.fillStyle = 'rgba(10,18,8,0.78)'; rrPath(ctx, x, y, w, h, 26); ctx.fill();
+  ctx.strokeStyle = '#ffd56b'; ctx.lineWidth = 4; ctx.stroke();
+  txt('ATINI SEÇ!', x + w / 2, y + 60, 62, '#ffd56b', 'center', { font: TFONT, lw: 8 });
+  txt('Yorumlara 1, 2, 3, 4 veya 5 yaz', x + w / 2, y + 126, 34, '#ffffff', 'center', { lw: 6 });
+  if (G.lobbyEnd) {
+    const left = Math.max(0, Math.ceil(G.lobbyEnd - G.t));
+    const pulse = left <= 5 ? 1 + Math.sin(G.t * 10) * 0.06 : 1;
+    ctx.save(); ctx.translate(x + w / 2, y + 196); ctx.scale(pulse, pulse);
+    txt('Koşu ' + left + ' sn sonra başlıyor', 0, 0, 38, left <= 5 ? '#ff8a6a' : '#bfffb0', 'center', { lw: 6 });
+    ctx.restore();
+  } else txt('İlk seçimle geri sayım başlar…', x + w / 2, y + 196, 32, '#cfe0c8', 'center', { lw: 5, weight: 'italic bold' });
+}
+function drawCaption() {
+  const x = 20, y = TRACK_BOTTOM + 40, w = 1040, h = 96;
+  const age = SPEECH.captionAge, show = SPEECH.speaking || age < 6;
+  ctx.fillStyle = 'rgba(10,18,8,0.88)'; rrPath(ctx, x, y, w, h, 18); ctx.fill();
+  ctx.strokeStyle = SPEECH.speaking ? '#ffd56b' : 'rgba(217,177,74,0.5)'; ctx.lineWidth = 3; ctx.stroke();
+  const pulse = SPEECH.speaking ? 1 + Math.sin(G.t * 12) * 0.08 : 1;
+  ctx.save(); ctx.translate(x + 46, y + h / 2); ctx.scale(pulse, pulse); txt('🎙️', 0, 0, 38, '#fff', 'center', { stroke: false }); ctx.restore();
+  if (!show || !SPEECH.caption) { txt('Spiker yarışı izliyor…', x + 86, y + h / 2, 26, '#9fb59a', 'left', { stroke: false, weight: 'italic' }); return; }
+  setFont(27);
+  const lines = wrapText(SPEECH.caption, w - 110, 2);
+  lines.forEach((l, i) => txt(l, x + 86, y + h / 2 + (i - (lines.length - 1) / 2) * 33, 27, '#ffffff', 'left', { stroke: false }));
+}
+function drawTable() {
+  const x = 20, y = TRACK_BOTTOM + 146, w = 660, h = H - y - 14;
+  ctx.fillStyle = 'rgba(10,18,8,0.8)'; rrPath(ctx, x, y, w, h, 18); ctx.fill();
+  ctx.strokeStyle = '#d9b14a'; ctx.lineWidth = 3; ctx.stroke();
+  txt('📋 TARAFTAR TABLOSU', x + w / 2, y + 30, 25, '#ffd56b', 'center', { lw: 4 });
+  const rowH = 47, r = G.phase === 'lobby' ? G.horses : ranking();
+  r.forEach((hh, i) => {
+    const ry = y + 56 + i * rowH + rowH / 2, s = SILKS[hh.lane];
+    ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(x + 34, ry, 17, 0, TAU); ctx.fill();
+    txt(String(hh.num), x + 34, ry + 1, 19, s.num, 'center', { stroke: false });
+    setFont(23); txt(fitText(hh.name, 190), x + 62, ry, 23, '#f3f8ef', 'left', { lw: 3 });
+    txt('👥 ' + hh.supporters.size, x + 300, ry, 21, '#ffe9a8', 'left', { lw: 3 });
+    let top = null;
+    for (const sp of hh.supporters.values()) if (sp.pts > 0 && (!top || sp.pts > top.pts)) top = sp;
+    setFont(19);
+    txt(top ? '⭐ ' + fitText(top.name, 150) : '', x + 380, ry, 19, '#cfe0c8', 'left', { lw: 3 });
+    const p = clamp(hh.pos / G.U, 0, 1);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)'; rrPath(ctx, x + 560, ry - 7, 82, 14, 7); ctx.fill();
+    if (p > 0) { ctx.fillStyle = s.silk; rrPath(ctx, x + 560, ry - 7, Math.max(14, 82 * p), 14, 7); ctx.fill(); }
+  });
+}
+function drawHowTo() {
+  const x = 695, y = TRACK_BOTTOM + 146, w = 365, h = H - y - 14;
+  ctx.fillStyle = 'rgba(10,18,8,0.84)'; rrPath(ctx, x, y, w, h, 18); ctx.fill();
+  ctx.strokeStyle = '#d9b14a'; ctx.lineWidth = 2; ctx.stroke();
+  txt('❓ NASIL OYNANIR', x + w / 2, y + 30, 23, '#ffd56b', 'center', { lw: 4 });
+  const lines = ['🔢 1-5 yaz → Atını seç', '❤️ Beğen → Atın koşar', '💬 Yorum → Tezahürat', '🎁 Hediye → Sprint!', '➕ Takip · 📣 Paylaş → Güç', '🏆 Kazananın taraftarları', '     anons edilir!'];
+  lines.forEach((l, i) => txt(l, x + 18, y + 66 + i * 34, 21, '#f3f8ef', 'left', { stroke: false, weight: '600' }));
+}
+function drawFloaters() {
+  for (const f of G.floaters) { ctx.globalAlpha = clamp(f.life / f.max * 1.5, 0, 1); txt(f.text, f.x, f.y, f.size, f.color === '#f4f4f0' ? '#ffffff' : f.color, 'center', { lw: 5 }); }
+  ctx.globalAlpha = 1;
+}
+function drawResults() {
+  if (G.phase !== 'results' || !G.winner) return;
+  const a = easeOut(clamp(G.phaseTime / 0.6, 0, 1)), w = G.winner, s = SILKS[w.lane];
+  ctx.save(); ctx.globalAlpha = a;
+  const x = 50, y = 190, pw = 980, ph = TRACK_BOTTOM - 210;
+  ctx.fillStyle = 'rgba(10,18,8,0.86)'; rrPath(ctx, x, y, pw, ph, 30); ctx.fill();
+  ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = 5; ctx.stroke();
+  txt('🏆 KAZANAN 🏆', 540, y + 70, 56, '#ffd34d', 'center', { font: TFONT, lw: 8 });
+  ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(540, y + 160, 46, 0, TAU); ctx.fill();
+  txt(String(w.num), 540, y + 162, 52, s.num, 'center', { stroke: false });
+  txt(w.name, 540, y + 240, 64, '#ffffff', 'center', { font: TFONT, lw: 8 });
+  const show = { ...w, speedVis: 0.9, boost: 0 };
+  drawHorse(show, 480, y + 490, 1.3);
+  txt('EN ÇOK DESTEKLEYENLER', 540, y + 550, 32, '#ffd56b', 'center', { lw: 5 });
+  if (!G.winnerTop.length) txt('Bu koşuda destek gelmedi', 540, y + 610, 28, '#cfe0c8', 'center', { lw: 4 });
+  const medals = ['#ffd34d', '#d7dde3', '#d59a5a'];
+  G.winnerTop.forEach((sp, i) => {
+    const ry = y + 610 + i * 58;
+    ctx.fillStyle = medals[i]; ctx.beginPath(); ctx.arc(250, ry, 20, 0, TAU); ctx.fill();
+    txt(String(i + 1), 250, ry + 1, 22, '#1a1f14', 'center', { stroke: false });
+    setFont(32); txt(fitText(sp.name, 420), 290, ry, 32, '#ffffff', 'left', { lw: 5 });
+    txt(fmt(sp.pts) + ' puan', 830, ry, 28, '#ffd56b', 'right', { lw: 4 });
+  });
+  const order = G.finishOrder.map(h => h.place + '. ' + h.name).join('   ');
+  setFont(24); txt(fitText(order, 900), 540, y + ph - 90, 24, '#cfe0c8', 'center', { lw: 4 });
+  const left = Math.max(0, Math.ceil(CONFIG.race.resultsSeconds - G.phaseTime));
+  txt('Yeni koşu ' + left + ' sn sonra · Şimdiden 1-5 yazıp atını seç!', 540, y + ph - 44, 27, '#f3f8ef', 'center', { lw: 5 });
+  ctx.restore();
+}
+function render() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(BG, 0, 0);
+  drawCrowd();
+  drawSigns();
+  drawHorses();
+  drawGate();
+  drawLaneTags();
+  drawParticles();
+  drawFloaters();
+  drawTop();
+  drawNotifs();
+  drawLobbyBanner();
+  drawResults();
+  drawCaption();
+  drawTable();
+  drawHowTo();
+  if (G.flash > 0) { ctx.fillStyle = 'rgba(255,250,225,' + G.flash + ')'; ctx.fillRect(0, 0, W, H); }
+}
+
+/* =====================================================================
+   Ana döngü
+   ===================================================================== */
+let lastTs = performance.now(), fps = 60, fpsN = 0, fpsAcc = 0;
+function frame(ts) {
+  let dt = (ts - lastTs) / 1000; lastTs = ts;
+  fpsN++; fpsAcc += dt; if (fpsAcc >= 1) { fps = Math.round(fpsN / fpsAcc); fpsN = 0; fpsAcc = 0; }
+  dt = clamp(dt, 0, 0.05);
+  try { update(dt); render(); } catch (e) { console.error(e); }
+  requestAnimationFrame(frame);
+}
+newRace();
+requestAnimationFrame(frame);
+
+(function () {
+  if (!CONFIG.websocket.enabled) return;
+  function connect() {
+    let ws;
+    try { ws = new WebSocket(wsUrl()); } catch (e) { setTimeout(connect, CONFIG.websocket.reconnectMs); return; }
+    wsSock = ws;
+    ws.onopen = () => { wsStatus = 'bağlı'; };
+    ws.onmessage = m => {
+      try {
+        const d = JSON.parse(m.data);
+        for (const x of Array.isArray(d) ? d : [d]) { if (x && x.type === 'tts') SPEECH.onTTS(x); else window.handleEvent(x); }
+      } catch (e) { /* bozuk mesaj */ }
+    };
+    ws.onerror = () => {};
+    ws.onclose = () => { wsStatus = 'bağlı değil'; if (wsSock === ws) wsSock = null; setTimeout(connect, CONFIG.websocket.reconnectMs); };
+  }
+  connect();
+})();
+
+/* =====================================================================
+   Deneme paneli (?test=1)
+   ===================================================================== */
+window.GAME = { CONFIG, state: G, newRace, startRace, SPEECH };
+if (new URLSearchParams(location.search).get('test') === '1' || location.hash === '#test') (function () {
+  const FIRST = ['Ahmet', 'Mehmet', 'Ayşe', 'Fatma', 'Emre', 'Zeynep', 'Burak', 'Elif', 'Mustafa', 'Yusuf', 'Hatice', 'Ömer', 'Kerem',
+    'Selin', 'Merve', 'Hakan', 'Büşra', 'Oğuz', 'Şeyma', 'İbrahim', 'Esra', 'Furkan', 'Çağla', 'Barış', 'Derya', 'Murat', 'Sena'];
+  const SUF = ['', '_34', '_06', '.tr', '1453', '_35', '07', '_ist'];
+  const pool = [];
+  let uid = 0;
+  const newPerson = () => { const p = { user: 't' + (++uid) + '_' + Math.floor(Math.random() * 1e6), nickname: pick(FIRST) + pick(SUF) }; pool.push(p); if (pool.length > 80) pool.shift(); return p; };
+  const anyPerson = () => (pool.length && Math.random() < 0.85 ? pick(pool) : newPerson());
+  const send = o => window.handleEvent(o);
+  const joinN = n => { const p = newPerson(); send({ type: 'chat', user: p.user, nickname: p.nickname, text: String(n) }); };
+  const gift = (d, name) => { const p = anyPerson(); send({ type: 'gift', user: p.user, nickname: p.nickname, giftName: name, diamonds: d, count: 1 }); };
+  const panel = document.createElement('div');
+  panel.id = 'testPanel';
+  panel.innerHTML = '<div class="hd"><span>🧪 Deneme Paneli</span><button title="Küçült">–</button></div><div class="grid"></div><div class="stats"></div>';
+  document.body.appendChild(panel);
+  panel.querySelector('.hd button').onclick = () => panel.classList.toggle('min');
+  const grid = panel.querySelector('.grid');
+  const buttons = [
+    ['🔢 Rastgele katılım', () => joinN(1 + ((Math.random() * 5) | 0))],
+    ['💬 Tezahürat yorumu', () => { const p = anyPerson(); send({ type: 'chat', user: p.user, nickname: p.nickname, text: 'Haydi koş!' }); }],
+    ['1️⃣ 1 numaraya katıl', () => joinN(1)], ['2️⃣ 2 numaraya katıl', () => joinN(2)],
+    ['3️⃣ 3 numaraya katıl', () => joinN(3)], ['4️⃣ 4 numaraya katıl', () => joinN(4)],
+    ['5️⃣ 5 numaraya katıl', () => joinN(5)],
+    ['❤️ 15 beğeni', () => { const p = anyPerson(); send({ type: 'like', user: p.user, nickname: p.nickname, count: 15 }); }],
+    ['🎁 Küçük hediye (1)', () => gift(1, 'Gül')], ['🎁 Orta hediye (10)', () => gift(10, 'Parfüm')],
+    ['🎁 Büyük hediye (50)', () => gift(50, 'Konfeti')], ['🎁 Dev hediye (200)', () => gift(200, 'Aslan')],
+    ['➕ Takip', () => { const p = anyPerson(); send({ type: 'follow', user: p.user, nickname: p.nickname }); }],
+    ['📣 Paylaşım', () => { const p = anyPerson(); send({ type: 'share', user: p.user, nickname: p.nickname }); }],
+    ['👥 30 kişi katılsın + beğeni yağmuru', () => {
+      for (let i = 0; i < 30; i++) setTimeout(() => { const p = newPerson(); send({ type: 'chat', user: p.user, nickname: p.nickname, text: String(1 + (i % 5)) }); }, i * 60);
+      let k = 0; const iv = setInterval(() => { if (++k > 120) { clearInterval(iv); return; } const p = anyPerson(); send({ type: 'like', user: p.user, nickname: p.nickname, count: 5 + ((Math.random() * 10) | 0) }); if (k % 25 === 0) gift(pick([1, 5, 30]), 'Gül'); }, 120);
+    }, 'wide'],
+    ['▶️ Koşuyu başlat', () => { if (G.phase === 'lobby') startRace(); }],
+    ['🔊 Ses aç/kapat', () => SFX.toggle()],
+    ['🎙️ Spiker testi', () => SPEECH.say('Merhaba! Ben yarışın spikeriyim. Ses düzgün geliyor mu?', 3)],
+    ['🔄 Yeni koşu', () => newRace(), 'warn']
+  ];
+  for (const [label, fn, cls] of buttons) { const b = document.createElement('button'); b.textContent = label; b.onclick = fn; if (cls) b.className = cls; grid.appendChild(b); }
+  const stats = panel.querySelector('.stats');
+  setInterval(() => {
+    stats.textContent =
+      'FPS: ' + fps + '   Aşama: ' + G.phase + '\n' +
+      'Kuyruk: ' + queue.length + '   Katılımcı: ' + participants() + '\n' +
+      'Bitiş birimi: ' + G.U + '   Parçacık: ' + G.particles.length + '\n' +
+      'WebSocket: ' + wsStatus + '   Ses: ' + SFX.state + '\n' +
+      'Spiker: ' + (SPEECH.speaking ? 'konuşuyor' : 'sessiz') + '\n' +
+      G.horses.map(h => h.num + ': ' + Math.round(h.pos) + ' (+' + Math.round(h.pending) + ') ×' + catchup(h).toFixed(2)).join('\n');
+  }, 400);
+})();
+</script>
+</body>
+</html>
