@@ -76,6 +76,12 @@ const CONFIG = {
     statusEverySeconds: 14,
     inviteEverySeconds: 30
   },
+  render: {
+    hiDpi: true,                 // ekran 1080×1920'den büyükse daha yüksek çözünürlükte (keskin) çiz
+    maxScale: 2,                 // en fazla 2 kat (2160×3840)
+    lowDetail: true,             // yayın sıkıştırmasına uygun sade doku (düşük internet hızında daha net)
+    maxFps: 60                   // 30 yapılırsa daha az işlemci kullanır
+  },
   audio: {
     enabled: true,
     volume: 0.5,
@@ -99,12 +105,22 @@ const CONFIG = {
 const W = 1080, H = 1920;
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+let RS = 1;                       // çizim ölçeği: oyun 1080×1920 mantıksal birimde çizilir, ekran piksel yoğunluğuna göre büyütülür
 function fit() {
   const s = Math.min(window.innerWidth / W, window.innerHeight / H);
-  canvas.style.width = Math.floor(W * s) + 'px';
-  canvas.style.height = Math.floor(H * s) + 'px';
+  const cw = Math.floor(W * s), ch = Math.floor(H * s);
+  canvas.style.width = cw + 'px';
+  canvas.style.height = ch + 'px';
+  const R = CONFIG.render;
+  const want = R.hiDpi ? Math.min(R.maxScale, Math.max(1, cw * (window.devicePixelRatio || 1) / W)) : 1;
+  const rs = Math.round(want * 4) / 4;          // 1, 1.25, 1.5 … (gereksiz yeniden oluşturmayı önler)
+  if (rs !== RS || canvas.width !== Math.round(W * rs)) {
+    RS = rs;
+    canvas.width = Math.round(W * RS); canvas.height = Math.round(H * RS);
+    if (typeof buildBG === 'function') BG = buildBG();
+  }
 }
-window.addEventListener('resize', fit); fit();
+window.addEventListener('resize', fit);
 const rand = (a, b) => a + Math.random() * (b - a);
 const pick = a => a[(Math.random() * a.length) | 0];
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -725,8 +741,12 @@ function raceCommentary() {
    Çizim – arka plan (bir kez çizilir)
    ===================================================================== */
 const CROWD = [];
-const BG = (function () {
-  const [c, g] = mk(W, H);
+let BG = null;
+function buildBG() {
+  const LD = CONFIG.render.lowDetail;
+  CROWD.length = 0;
+  const [c, g] = mk(Math.round(W * RS), Math.round(H * RS));
+  g.scale(RS, RS);
   let gr = g.createLinearGradient(0, 0, 0, 380);
   gr.addColorStop(0, '#5fa8e0'); gr.addColorStop(1, '#cfe8f7');
   g.fillStyle = gr; g.fillRect(0, 0, W, 400);
@@ -745,15 +765,18 @@ const BG = (function () {
   for (let r = 0; r < 4; r++) g.fillRect(0, 398 + r * 40, W, 8);
   g.fillStyle = '#7d6d58';
   for (let x = 30; x < W; x += 170) g.fillRect(x, 362, 10, 200);
-  for (let r = 0; r < 4; r++) for (let x = 8; x < W; x += 15) {
-    const col = pick(['#d6322f', '#2f5fd0', '#f2c230', '#2f9a4f', '#ffffff', '#ff8a3d', '#8a4fd0', '#222', '#e86fb0']);
-    if (r === 3) CROWD.push({ x: x + rand(-3, 3), y: 540, c: col, skin: pick(['#f0c9a0', '#d9a273', '#b07850', '#8a5a3a']), ph: rand(0, TAU) });
-    else { g.fillStyle = col; g.fillRect(x, 410 + r * 40 - 14, 10, 14); g.fillStyle = pick(['#f0c9a0', '#d9a273', '#b07850']); g.beginPath(); g.arc(x + 5, 410 + r * 40 - 19, 5, 0, TAU); g.fill(); }
+  // seyirciler: sade modda daha iri ve daha az renk (sıkıştırmada karıncalanmaz)
+  const step = LD ? 24 : 15, bw = LD ? 16 : 10, bh = LD ? 16 : 14, hr = LD ? 7 : 5;
+  const cols = LD ? ['#c94a44', '#4a6fc4', '#e0b84a', '#4f9a62', '#efe9de'] : ['#d6322f', '#2f5fd0', '#f2c230', '#2f9a4f', '#ffffff', '#ff8a3d', '#8a4fd0', '#222', '#e86fb0'];
+  for (let r = 0; r < 4; r++) for (let x = 8; x < W; x += step) {
+    const col = pick(cols);
+    if (r === 3) CROWD.push({ x: x + (LD ? 0 : rand(-3, 3)), y: 540, c: col, skin: pick(['#f0c9a0', '#d9a273', '#b07850', '#8a5a3a']), ph: rand(0, TAU), w: bw + 1, hr: hr + 0.5 });
+    else { g.fillStyle = col; g.fillRect(x, 410 + r * 40 - bh, bw, bh); g.fillStyle = pick(['#f0c9a0', '#d9a273', '#b07850']); g.beginPath(); g.arc(x + bw / 2, 410 + r * 40 - bh - hr + 1, hr, 0, TAU); g.fill(); }
   }
   // pist
   g.fillStyle = '#5c9a3d'; g.fillRect(0, TRACK_TOP - 8, W, TRACK_BOTTOM - TRACK_TOP + 16);
   for (let x = 0; x < W; x += 120) { g.fillStyle = 'rgba(255,255,255,0.05)'; g.fillRect(x, TRACK_TOP, 60, TRACK_BOTTOM - TRACK_TOP); }
-  for (let i = 0; i < 900; i++) { g.fillStyle = pick(['rgba(30,70,20,0.18)', 'rgba(150,200,90,0.14)']); g.fillRect(rand(0, W), rand(TRACK_TOP, TRACK_BOTTOM), 2, rand(3, 7)); }
+  if (!LD) for (let i = 0; i < 900; i++) { g.fillStyle = pick(['rgba(30,70,20,0.18)', 'rgba(150,200,90,0.14)']); g.fillRect(rand(0, W), rand(TRACK_TOP, TRACK_BOTTOM), 2, rand(3, 7)); }
   for (let i = 1; i < LANES; i++) {
     const y = TRACK_TOP + i * LANE_H;
     g.strokeStyle = 'rgba(255,255,255,0.45)'; g.lineWidth = 3; g.setLineDash([26, 18]);
@@ -778,7 +801,9 @@ const BG = (function () {
   gr.addColorStop(0, '#1b2716'); gr.addColorStop(1, '#0d140b');
   g.fillStyle = gr; g.fillRect(0, TRACK_BOTTOM + 28, W, H - TRACK_BOTTOM - 28);
   return c;
-})();
+}
+fit();
+BG = buildBG();
 
 /* =====================================================================
    Çizim – at ve jokey
@@ -863,9 +888,9 @@ function drawCrowd() {
   const amp = 2 + G.excitement * 9;
   for (const p of CROWD) {
     const jump = Math.max(0, Math.sin(G.t * (3 + G.excitement * 5) + p.ph)) * amp;
-    ctx.fillStyle = p.c; ctx.fillRect(p.x, p.y - 16 - jump, 11, 16);
-    ctx.fillStyle = p.skin; ctx.beginPath(); ctx.arc(p.x + 5.5, p.y - 22 - jump, 5.5, 0, TAU); ctx.fill();
-    if (G.excitement > 0.6 && (p.ph * 10 | 0) % 3 === 0) { ctx.fillStyle = p.c; ctx.fillRect(p.x + 9, p.y - 34 - jump, 3, 14); }
+    ctx.fillStyle = p.c; ctx.fillRect(p.x, p.y - 16 - jump, p.w, 16);
+    ctx.fillStyle = p.skin; ctx.beginPath(); ctx.arc(p.x + p.w / 2, p.y - 16 - p.hr - jump, p.hr, 0, TAU); ctx.fill();
+    if (G.excitement > 0.6 && (p.ph * 10 | 0) % 3 === 0) { ctx.fillStyle = p.c; ctx.fillRect(p.x + p.w - 3, p.y - 34 - jump, 4, 16); }
   }
 }
 function drawSigns() {
@@ -896,13 +921,13 @@ function drawGate() {
 function drawLaneTags() {
   for (const h of G.horses) {
     const y = TRACK_TOP + h.lane * LANE_H + 8, s = SILKS[h.lane];
-    ctx.fillStyle = 'rgba(10,20,8,0.62)'; rrPath(ctx, 10, y, 370, 32, 16); ctx.fill();
-    ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(28, y + 16, 13, 0, TAU); ctx.fill();
-    txt(String(h.num), 28, y + 17, 17, s.num, 'center', { stroke: false });
-    setFont(20);
-    txt(fitText(h.name, 210), 50, y + 17, 20, '#ffffff', 'left', { lw: 3 });
-    txt('👥 ' + h.supporters.size, 370, y + 17, 19, '#ffe9a8', 'right', { lw: 3 });
-    if (h.place != null && G.phase === 'results') txt(h.place + '.', 400, y + 17, 22, '#ffd34d', 'left', { lw: 4 });
+    ctx.fillStyle = 'rgba(10,20,8,0.72)'; rrPath(ctx, 8, y - 2, 400, 38, 19); ctx.fill();
+    ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(28, y + 17, 15, 0, TAU); ctx.fill();
+    txt(String(h.num), 28, y + 18, 20, s.num, 'center', { stroke: false });
+    setFont(24);
+    txt(fitText(h.name, 225), 52, y + 18, 24, '#ffffff', 'left', { lw: 4 });
+    txt('👥 ' + h.supporters.size, 398, y + 18, 23, '#ffe9a8', 'right', { lw: 4 });
+    if (h.place != null && G.phase === 'results') txt(h.place + '.', 418, y + 18, 26, '#ffd34d', 'left', { lw: 4 });
   }
 }
 function drawHorses() {
@@ -975,9 +1000,9 @@ function drawCaption() {
   const pulse = SPEECH.speaking ? 1 + Math.sin(G.t * 12) * 0.08 : 1;
   ctx.save(); ctx.translate(x + 46, y + h / 2); ctx.scale(pulse, pulse); txt('🎙️', 0, 0, 38, '#fff', 'center', { stroke: false }); ctx.restore();
   if (!show || !SPEECH.caption) { txt('Spiker yarışı izliyor…', x + 86, y + h / 2, 26, '#9fb59a', 'left', { stroke: false, weight: 'italic' }); return; }
-  setFont(27);
+  setFont(29);
   const lines = wrapText(SPEECH.caption, w - 110, 2);
-  lines.forEach((l, i) => txt(l, x + 86, y + h / 2 + (i - (lines.length - 1) / 2) * 33, 27, '#ffffff', 'left', { stroke: false }));
+  lines.forEach((l, i) => txt(l, x + 86, y + h / 2 + (i - (lines.length - 1) / 2) * 36, 29, '#ffffff', 'left', { stroke: false }));
 }
 function drawTable() {
   const x = 20, y = TRACK_BOTTOM + 146, w = 660, h = H - y - 14;
@@ -989,12 +1014,12 @@ function drawTable() {
     const ry = y + 56 + i * rowH + rowH / 2, s = SILKS[hh.lane];
     ctx.fillStyle = s.silk; ctx.beginPath(); ctx.arc(x + 34, ry, 17, 0, TAU); ctx.fill();
     txt(String(hh.num), x + 34, ry + 1, 19, s.num, 'center', { stroke: false });
-    setFont(23); txt(fitText(hh.name, 190), x + 62, ry, 23, '#f3f8ef', 'left', { lw: 3 });
-    txt('👥 ' + hh.supporters.size, x + 300, ry, 21, '#ffe9a8', 'left', { lw: 3 });
+    setFont(26); txt(fitText(hh.name, 200), x + 62, ry, 26, '#f3f8ef', 'left', { lw: 4 });
+    txt('👥 ' + hh.supporters.size, x + 285, ry, 24, '#ffe9a8', 'left', { lw: 4 });
     let top = null;
     for (const sp of hh.supporters.values()) if (sp.pts > 0 && (!top || sp.pts > top.pts)) top = sp;
-    setFont(19);
-    txt(top ? '⭐ ' + fitText(top.name, 150) : '', x + 380, ry, 19, '#cfe0c8', 'left', { lw: 3 });
+    setFont(21);
+    txt(top ? '⭐ ' + fitText(top.name, 140) : '', x + 375, ry, 21, '#cfe0c8', 'left', { lw: 3 });
     const p = clamp(hh.pos / G.U, 0, 1);
     ctx.fillStyle = 'rgba(255,255,255,0.12)'; rrPath(ctx, x + 560, ry - 7, 82, 14, 7); ctx.fill();
     if (p > 0) { ctx.fillStyle = s.silk; rrPath(ctx, x + 560, ry - 7, Math.max(14, 82 * p), 14, 7); ctx.fill(); }
@@ -1006,7 +1031,7 @@ function drawHowTo() {
   ctx.strokeStyle = '#d9b14a'; ctx.lineWidth = 2; ctx.stroke();
   txt('❓ NASIL OYNANIR', x + w / 2, y + 30, 23, '#ffd56b', 'center', { lw: 4 });
   const lines = ['🔢 1-5 yaz → Atını seç', '❤️ Beğen → Atın koşar', '💬 Yorum → Tezahürat', '🎁 Hediye → Sprint!', '➕ Takip · 📣 Paylaş → Güç', '🏆 Kazananın taraftarları', '     anons edilir!'];
-  lines.forEach((l, i) => txt(l, x + 18, y + 66 + i * 34, 21, '#f3f8ef', 'left', { stroke: false, weight: '600' }));
+  lines.forEach((l, i) => txt(l, x + 16, y + 66 + i * 34, 23, '#f3f8ef', 'left', { stroke: false, weight: 'bold' }));
 }
 function drawFloaters() {
   for (const f of G.floaters) { ctx.globalAlpha = clamp(f.life / f.max * 1.5, 0, 1); txt(f.text, f.x, f.y, f.size, f.color === '#f4f4f0' ? '#ffffff' : f.color, 'center', { lw: 5 }); }
@@ -1042,8 +1067,9 @@ function drawResults() {
   ctx.restore();
 }
 function render() {
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.drawImage(BG, 0, 0);
+  ctx.setTransform(RS, 0, 0, RS, 0, 0);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(BG, 0, 0, W, H);
   drawCrowd();
   drawSigns();
   drawHorses();
@@ -1065,7 +1091,11 @@ function render() {
    Ana döngü
    ===================================================================== */
 let lastTs = performance.now(), fps = 60, fpsN = 0, fpsAcc = 0;
+let lastDraw = 0;
 function frame(ts) {
+  const minGap = 1000 / Math.max(10, CONFIG.render.maxFps) - 2;
+  if (CONFIG.render.maxFps < 60 && ts - lastDraw < minGap) { requestAnimationFrame(frame); return; }
+  lastDraw = ts;
   let dt = (ts - lastTs) / 1000; lastTs = ts;
   fpsN++; fpsAcc += dt; if (fpsAcc >= 1) { fps = Math.round(fpsN / fpsAcc); fpsN = 0; fpsAcc = 0; }
   dt = clamp(dt, 0, 0.05);
